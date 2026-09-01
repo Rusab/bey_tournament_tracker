@@ -21,6 +21,17 @@ const FINISHES = [
   { key: "xtreme", label: "Xtreme", pts: 3 },
 ];
 
+/* A penalty isn't a finish — it's a point awarded to the blader who didn't
+   commit it — so it scores like one but is kept separate everywhere it's
+   listed or tallied. */
+const PENALTY = { key: "penalty", label: "Penalty", pts: 1 };
+
+/** Everything that can put a point on the board. */
+const AWARDS = [...FINISHES, PENALTY];
+
+/** Tolerates unknown keys so old saved tournaments never crash the view. */
+const awardOf = (key) => AWARDS.find((a) => a.key === key);
+
 const GROUP_LETTERS = "ABCDEFGH".split("");
 const ROW_ID = "current"; // one row holds the live tournament
 
@@ -1261,6 +1272,24 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
   const Side = ({ side, color }) => {
     const val = side === 1 ? s1 : s2;
+
+    const awardBtn = (f, extra) => {
+      const award = Math.min(f.pts, target - val);
+      const capped = !over && award > 0 && award < f.pts;
+      return (
+        <button key={f.key} onClick={() => add(side, f)} disabled={over} className="bx-d"
+          style={{
+            background: C.raised, border: `1px solid ${capped ? C.gold + "88" : C.line}`,
+            borderRadius: 3, color: over ? C.muted : C.ink, padding: "12px 4px",
+            fontSize: 15, fontWeight: 700, cursor: over ? "not-allowed" : "pointer",
+            opacity: over ? 0.4 : 1, ...extra,
+          }}>
+          {f.label}
+          <span style={{ color: capped ? C.gold : C.muted, fontWeight: 600 }}> +{over ? f.pts : award}</span>
+        </button>
+      );
+    };
+
     return (
       <div style={{
         flex: 1, background: `${color}12`, border: `1px solid ${color}55`,
@@ -1274,23 +1303,13 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           fontSize: 62, fontWeight: 800, lineHeight: .95, color, marginBottom: 10,
         }}>{val}</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-          {FINISHES.map((f) => {
-            const award = Math.min(f.pts, target - val);
-            const capped = !over && award > 0 && award < f.pts;
-            return (
-              <button key={f.key} onClick={() => add(side, f)} disabled={over} className="bx-d"
-                style={{
-                  background: C.raised, border: `1px solid ${capped ? C.gold + "88" : C.line}`,
-                  borderRadius: 3, color: over ? C.muted : C.ink, padding: "12px 4px",
-                  fontSize: 15, fontWeight: 700, cursor: over ? "not-allowed" : "pointer",
-                  opacity: over ? 0.4 : 1,
-                }}>
-                {f.label}
-                <span style={{ color: capped ? C.gold : C.muted, fontWeight: 600 }}> +{over ? f.pts : award}</span>
-              </button>
-            );
-          })}
+          {FINISHES.map((f) => awardBtn(f))}
         </div>
+        {/* Set apart from the finishes — the point comes from the opponent's foul. */}
+        {awardBtn(PENALTY, {
+          marginTop: 6, background: "transparent",
+          borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
+        })}
       </div>
     );
   };
@@ -1371,7 +1390,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
                     fontSize: 12, padding: "4px 8px", borderRadius: 3,
                     background: `${col}18`, color: col, border: `1px solid ${col}44`,
                   }}>
-                    {FINISHES.find((f) => f.key === e.type).label} +{e.pts}
+                    {(awardOf(e.type) || { label: e.type }).label} +{e.pts}
                     {capped && <span style={{ color: C.gold }}> (capped from {e.raw})</span>}
                   </span>
                 );
@@ -1400,10 +1419,11 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 /* ================================================================== */
 
 function playerStats(pid, allMatches, t) {
+  const zeroed = () => Object.fromEntries(AWARDS.map((a) => [a.key, 0]));
   const st = {
     played: 0, wins: 0, losses: 0, pf: 0, pa: 0, winMargin: 0,
-    finishes: { spin: 0, over: 0, burst: 0, xtreme: 0 },
-    conceded: { spin: 0, over: 0, burst: 0, xtreme: 0 },
+    finishes: zeroed(),
+    conceded: zeroed(),
     log: [],
   };
   allMatches.forEach((m) => {
@@ -1415,12 +1435,17 @@ function playerStats(pid, allMatches, t) {
     st.played++; st.pf += my; st.pa += opp;
     const won = my > opp;
     if (won) { st.wins++; st.winMargin += my - opp; } else if (opp > my) st.losses++;
+    const tally = (bucket, type) => { if (bucket[type] != null) bucket[type]++; };
     (m.events || []).forEach((e) => {
-      if (e.side === me) st.finishes[e.type]++; else st.conceded[e.type]++;
+      tally(e.side === me ? st.finishes : st.conceded, e.type);
     });
     const key = stageOf(m, t);
     const label = (stagesFor(t.koSize, t.thirdPlace).find((s) => s.key === key) || {}).label || "Match";
-    st.log.push({ id: m.id, opp: me === 1 ? m.p2 : m.p1, my, oppScore: opp, won, stage: label });
+    st.log.push({
+      id: m.id, opp: me === 1 ? m.p2 : m.p1, my, oppScore: opp, won, stage: label,
+      // Every point of the match in the order it was scored, from this blader's side.
+      sequence: (m.events || []).map((e) => ({ type: e.type, pts: e.pts, mine: e.side === me })),
+    });
   });
   return st;
 }
@@ -1501,11 +1526,15 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
           <Blade color={C.cyan} h={16} />
           <h3 className="bx-d" style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>Finishes</h3>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 7, marginBottom: 22 }}>
-          {FINISHES.map((f) => (
+        <div style={{
+          display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(66px,1fr))",
+          gap: 7, marginBottom: 22,
+        }}>
+          {AWARDS.map((f) => (
             <div key={f.key} style={{
-              background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
-              padding: "11px 6px", textAlign: "center",
+              background: C.surface, borderRadius: 3, padding: "11px 6px", textAlign: "center",
+              border: `1px solid ${C.line}`,
+              borderStyle: f.key === PENALTY.key ? "dashed" : "solid",
             }}>
               <div className="bx-d" style={{ fontSize: 24, fontWeight: 800 }}>{st.finishes[f.key]}</div>
               <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>{f.label}</div>
@@ -1521,21 +1550,49 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
         {st.log.length === 0 ? (
           <div style={{ color: C.muted, fontSize: 14 }}>No completed matches yet.</div>
         ) : (
-          st.log.map((r) => (
-            <div key={r.id} style={{
-              display: "flex", alignItems: "center", gap: 10, background: C.surface,
-              border: `1px solid ${C.line}`, borderLeft: `3px solid ${r.won ? C.green : C.magenta}`,
-              borderRadius: 3, padding: "12px", marginBottom: 6,
-            }}>
-              <span style={{ fontSize: 11, color: C.muted, width: 76, flexShrink: 0, lineHeight: 1.2 }}>{r.stage}</span>
-              <span style={{ flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {nameOf(r.opp)}
-              </span>
-              <span className="bx-d" style={{ fontSize: 18, fontWeight: 800, color: r.won ? C.green : C.magenta }}>
-                {r.my}–{r.oppScore}
-              </span>
+          <>
+            <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 10, lineHeight: 1.5, maxWidth: "62ch" }}>
+              Each match lists every point in the order it was scored — <span style={{ color: C.green }}>green
+              theirs</span>, <span style={{ color: C.magenta }}>magenta the opponent's</span>.
             </div>
-          ))
+            {st.log.map((r) => (
+              <div key={r.id} style={{
+                background: C.surface, border: `1px solid ${C.line}`,
+                borderLeft: `3px solid ${r.won ? C.green : C.magenta}`,
+                borderRadius: 3, padding: "12px", marginBottom: 6,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, width: 76, flexShrink: 0, lineHeight: 1.2 }}>{r.stage}</span>
+                  <span style={{ flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {nameOf(r.opp)}
+                  </span>
+                  <span className="bx-d" style={{ fontSize: 18, fontWeight: 800, color: r.won ? C.green : C.magenta }}>
+                    {r.my}–{r.oppScore}
+                  </span>
+                </div>
+                {r.sequence.length > 0 && (
+                  <div style={{
+                    display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10,
+                    paddingTop: 10, borderTop: `1px solid ${C.line}66`,
+                  }}>
+                    {r.sequence.map((e, i) => {
+                      const a = awardOf(e.type);
+                      const col = e.mine ? C.green : C.magenta;
+                      return (
+                        <span key={i} style={{
+                          fontSize: 11.5, padding: "3px 7px", borderRadius: 3,
+                          background: `${col}16`, color: col, border: `1px solid ${col}44`,
+                          borderStyle: e.type === PENALTY.key ? "dashed" : "solid", whiteSpace: "nowrap",
+                        }}>
+                          {i + 1}. {(a || { label: e.type }).label} +{e.pts}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
         )}
       </div>
     </div>
