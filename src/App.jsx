@@ -590,6 +590,25 @@ function Confirm({ title, body, confirmLabel = "Confirm", tone = "primary", onCo
   );
 }
 
+/* ---- swipe between tabs ---------------------------------------- */
+
+const SWIPE_MIN_X = 60;      // shorter than this is a tap that wandered
+const SWIPE_MAX_MS = 700;    // slower than this is a drag, not a flick
+const SWIPE_X_OVER_Y = 1.6;  // must be decisively horizontal
+const SWIPE_EDGE = 20;       // leave the OS its back-gesture strip
+
+/**
+ * True if the touch began inside something that scrolls sideways on its own —
+ * the standings tables, for instance. Those swipes belong to that element.
+ */
+function inHorizontalScroller(el) {
+  for (let n = el; n && n !== document.body; n = n.parentElement) {
+    const ox = getComputedStyle(n).overflowX;
+    if ((ox === "auto" || ox === "scroll") && n.scrollWidth > n.clientWidth + 1) return true;
+  }
+  return false;
+}
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -707,6 +726,34 @@ export default function App() {
     return (id) => map[id] || "—";
   }, [t]);
 
+  // Swipe left/right across the board to change tabs. Measured on touchend
+  // only — nothing is preventDefault-ed, so vertical scrolling stays native.
+  const swipe = useRef(null);
+
+  const onTouchStart = (e) => {
+    const p = e.touches.length === 1 ? e.touches[0] : null;
+    swipe.current =
+      p && p.clientX > SWIPE_EDGE && p.clientX < window.innerWidth - SWIPE_EDGE
+        && !inHorizontalScroller(e.target)
+        ? { x: p.clientX, y: p.clientY, at: Date.now() }
+        : null;
+  };
+
+  const onTouchEnd = (e) => {
+    const start = swipe.current;
+    swipe.current = null;
+    if (!start || e.changedTouches.length !== 1) return;
+
+    const dx = e.changedTouches[0].clientX - start.x;
+    const dy = e.changedTouches[0].clientY - start.y;
+    if (Date.now() - start.at > SWIPE_MAX_MS) return;
+    if (Math.abs(dx) < SWIPE_MIN_X) return;
+    if (Math.abs(dx) < Math.abs(dy) * SWIPE_X_OVER_Y) return; // a scroll, not a swipe
+
+    const next = TABS.indexOf(tab) + (dx < 0 ? 1 : -1);
+    if (next >= 0 && next < TABS.length) setTab(TABS[next]); // no wrap-around
+  };
+
   if (!loaded) {
     return (
       <div className="bx" style={{ ...shell, display: "grid", placeItems: "center" }}>
@@ -812,7 +859,10 @@ export default function App() {
         )}
       </header>
 
-      <main style={{ padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto" }}>
+      <main
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+        style={{ padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto" }}>
         {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
         {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
           onScore={(id) => setScoring({ kind: "group", id })} />}
