@@ -449,6 +449,8 @@ const Style = () => (
     @media (max-width: 640px) {
       .bx-undo-fab { display: inline-flex; }
       .bx-undo-head { display: none; }
+      /* Icon alone on phones, so the tournament name gets the room. */
+      .bx-role-label { display: none; }
     }
     @media (prefers-reduced-motion: reduce) { .bx *, .bx-enter { animation: none !important; transition: none !important; } }
   `}</style>
@@ -549,6 +551,53 @@ function EmptyState({ title, body }) {
       <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, maxWidth: "44ch", margin: "0 auto" }}>{body}</div>
     </div>
   );
+}
+
+/**
+ * Confirmation for anything that throws away scores. Pass no onConfirm to
+ * make it a dead end — used where an action is refused outright rather than
+ * merely risky.
+ */
+function Confirm({ title, body, confirmLabel = "Confirm", tone = "primary", onConfirm, onClose }) {
+  return (
+    <div className="bx" style={{
+      position: "fixed", inset: 0, zIndex: 90, background: "#0B0718EE",
+      display: "grid", placeItems: "center", padding: 20,
+    }}>
+      <div style={{
+        width: "100%", maxWidth: 400, background: C.surface,
+        border: `1px solid ${C.line}`, borderRadius: 4, padding: 20,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <Blade color={onConfirm ? C.gold : C.magenta} h={24} />
+          <h2 className="bx-d" style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{title}</h2>
+        </div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: "0 0 18px" }}>{body}</p>
+        <div style={{ display: "flex", gap: 8 }}>
+          {onConfirm ? (
+            <>
+              <Btn onClick={onClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 12 }}>Cancel</Btn>
+              <Btn onClick={onConfirm} tone={tone} style={{ flex: 1, justifyContent: "center", padding: 12 }}>
+                {confirmLabel}
+              </Btn>
+            </>
+          ) : (
+            <Btn onClick={onClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 12 }}>Got it</Btn>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Matches that already hold a score — what a redraw or reset would destroy. */
+function scoredCount(t) {
+  const all = [
+    ...t.groupMatches,
+    ...(t.bracket ? t.bracket.rounds.flat() : []),
+    ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
+  ];
+  return all.filter((m) => (m.events || []).length > 0).length;
 }
 
 /* ================================================================== */
@@ -753,7 +802,7 @@ export default function App() {
             display: "flex", alignItems: "center", gap: 5,
           }}>
           {isAdmin ? <Unlock size={14} /> : <Lock size={14} />}
-          {isAdmin ? "Admin" : "View"}
+          <span className="bx-role-label">{isAdmin ? "Admin" : "View"}</span>
         </button>
         {isAdmin && (
           <button onClick={() => setShowSetup(true)} aria-label="Tournament settings"
@@ -1099,6 +1148,7 @@ function Setup({ onCreate }) {
 
 function GroupsView({ t, update, nameOf, isAdmin }) {
   const [moving, setMoving] = useState(null);
+  const [ask, setAsk] = useState(null); // null | "redraw" | "blocked"
   const assigned = new Set(t.groups.flatMap((g) => g.playerIds));
   const unassigned = t.players.filter((p) => !assigned.has(p.id));
 
@@ -1114,6 +1164,19 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
       d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
       return d;
     });
+    setAsk(null);
+  };
+
+  const scored = scoredCount(t);
+  const alreadyDrawn = t.groups.some((g) => g.playerIds.length > 0);
+
+  // A redraw once scores exist is never what someone means to do mid-event, so
+  // it is refused rather than merely confirmed — clearing the results has to be
+  // a separate, deliberate act.
+  const onDrawClick = () => {
+    if (scored > 0) setAsk("blocked");
+    else if (alreadyDrawn) setAsk("redraw");
+    else draw();
   };
 
   const moveTo = (playerId, gid) => {
@@ -1132,7 +1195,26 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
         sub={isAdmin
           ? "Tap a blader to move them. Results between two bladers who stay in the same group are kept."
           : "Who's in which group."}
-        action={isAdmin ? <Btn onClick={draw} tone="primary"><Shuffle size={15} />Random draw</Btn> : null} />
+        action={isAdmin ? (
+          <Btn onClick={onDrawClick} tone={scored > 0 ? "ghost" : "primary"}>
+            <Shuffle size={15} />Random draw
+          </Btn>
+        ) : null} />
+
+      {ask === "redraw" && (
+        <Confirm
+          title="Redraw the groups?"
+          body="Everyone is reshuffled at random and all fixtures are rebuilt. The current group arrangement is lost."
+          confirmLabel="Redraw" onConfirm={draw} onClose={() => setAsk(null)}
+        />
+      )}
+      {ask === "blocked" && (
+        <Confirm
+          title="Results are already in"
+          body={`${scored} match${scored > 1 ? "es have" : " has"} been scored. Redrawing would wipe ${scored > 1 ? "those results" : "that result"}, so it's blocked here. To start over, reset the match results in Settings first.`}
+          onClose={() => setAsk(null)}
+        />
+      )}
 
       {unassigned.length > 0 && (
         <div style={{ ...card, borderColor: `${C.gold}77`, marginBottom: 14 }}>
@@ -1270,12 +1352,22 @@ function MatchRow({ m, nameOf, onClick, label, locked }) {
 
 function TableView({ t, nameOf, update, onPlayer, isAdmin }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
+  const [ask, setAsk] = useState(false);
 
-  const makeBracket = () => update((d) => {
-    const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf);
-    d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
-    return d;
-  });
+  const makeBracket = () => {
+    update((d) => {
+      const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf);
+      d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
+      return d;
+    });
+    setAsk(false);
+  };
+
+  // Knockout scores already entered — what a rebuild would wipe.
+  const koScored = t.bracket
+    ? [...t.bracket.rounds.flat(), ...(t.bracket.third ? [t.bracket.third] : [])]
+        .filter((m) => (m.events || []).length > 0).length
+    : 0;
 
   if (!t.groupMatches.length) {
     return <EmptyState title="No standings yet" body="Draw the groups and the tables appear here." />;
@@ -1346,10 +1438,22 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin }) {
               : `${t.groupMatches.filter((m) => !m.done).length} group matches still to play. You can build early, but the seeding will change.`}
             {t.bracket && " Rebuilding clears any knockout results already entered."}
           </div>
-          <Btn onClick={makeBracket} tone={allPlayed ? "primary" : "default"}>
+          <Btn onClick={() => (t.bracket ? setAsk(true) : makeBracket())}
+            tone={allPlayed ? "primary" : "default"}>
             <GitBranch size={15} />{t.bracket ? "Rebuild bracket" : "Build bracket"}
           </Btn>
         </div>
+      )}
+
+      {ask && (
+        <Confirm
+          title="Rebuild the bracket?"
+          body={koScored > 0
+            ? `The bracket is reseeded from the current standings, and the ${koScored} knockout match${koScored > 1 ? "es" : ""} already scored ${koScored > 1 ? "are" : "is"} cleared.`
+            : "The bracket is reseeded from the current standings. Nothing has been scored in the knockout yet, so no results are lost."}
+          confirmLabel="Rebuild" tone={koScored > 0 ? "danger" : "primary"}
+          onConfirm={makeBracket} onClose={() => setAsk(false)}
+        />
       )}
     </div>
   );
@@ -1456,6 +1560,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const stageLabel = (stagesFor(t.koSize, t.thirdPlace).find((s) => s.key === stage) || {}).label || "Match";
 
   const [events, setEvents] = useState(match.events || []);
+  const [askReset, setAskReset] = useState(false);
   const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
   const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
   const over = s1 >= target || s2 >= target;
@@ -1528,12 +1633,23 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.05 }}>First to {target}</div>
           <div style={{ fontSize: 11.5, color: C.muted }}>{stageLabel}</div>
         </div>
-        <Btn onClick={() => setEvents([])} tone="ghost" style={{ padding: "7px 11px" }}>Reset</Btn>
+        <Btn onClick={() => (events.length ? setAskReset(true) : null)} tone="ghost"
+          disabled={!events.length} style={{ padding: "7px 11px" }}>Reset</Btn>
         <span className="bx-undo-head">
           <Btn onClick={() => setEvents((v) => v.slice(0, -1))} tone="ghost" disabled={!events.length}
             style={{ padding: "7px 11px" }} aria-label="Undo last finish"><Undo2 size={15} /></Btn>
         </span>
       </div>
+
+      {askReset && (
+        <Confirm
+          title="Clear this match?"
+          body={`All ${events.length} point${events.length > 1 ? "s" : ""} scored in this match ${events.length > 1 ? "are" : "is"} removed and the scoreboard goes back to 0–0.`}
+          confirmLabel="Clear" tone="danger"
+          onConfirm={() => { setEvents([]); setAskReset(false); }}
+          onClose={() => setAskReset(false)}
+        />
+      )}
 
       {events.length > 0 && (
         <button
@@ -1801,6 +1917,20 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
 
 function SettingsSheet({ t, update, onClose, onReset }) {
   const [confirm, setConfirm] = useState(false);
+  const [askClear, setAskClear] = useState(false);
+  const scored = scoredCount(t);
+
+  /* Scores go, the shape of the tournament stays. The bracket goes too: it was
+     seeded from standings that no longer exist, so it would be a fiction. */
+  const clearResults = () => {
+    update((d) => {
+      d.groupMatches.forEach((m) => { m.events = []; m.done = false; });
+      d.bracket = null;
+      return d;
+    });
+    setAskClear(false);
+  };
+
   return (
     <div className="bx" style={{
       position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
@@ -1861,6 +1991,19 @@ function SettingsSheet({ t, update, onClose, onReset }) {
         </label>
 
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+          <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Reset match results</div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
+            Wipes every score but keeps the bladers and the groups. Do this before
+            redrawing the groups — {scored > 0
+              ? `${scored} match${scored > 1 ? "es have" : " has"} been scored so far.`
+              : "nothing has been scored yet."}
+          </div>
+          <Btn onClick={() => setAskClear(true)} tone="danger" disabled={scored === 0}>
+            <Undo2 size={15} />Reset results
+          </Btn>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Start over</div>
           <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
             Deletes this tournament and everything in it, then takes you back to setup.
@@ -1875,6 +2018,15 @@ function SettingsSheet({ t, update, onClose, onReset }) {
           )}
         </div>
       </div>
+
+      {askClear && (
+        <Confirm
+          title="Reset every result?"
+          body={`${scored > 1 ? `All ${scored} scored matches are` : "The one scored match is"} cleared and the knockout bracket is removed — bladers, groups and settings stay as they are. The bracket can be rebuilt from the Table tab.`}
+          confirmLabel="Clear every score" tone="danger"
+          onConfirm={clearResults} onClose={() => setAskClear(false)}
+        />
+      )}
     </div>
   );
 }
