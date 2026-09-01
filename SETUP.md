@@ -80,7 +80,7 @@ Open the URL it prints, tap "I'm the organiser," and sign in with the admin
 account from step 2. Create a test tournament and confirm it appears in the
 Supabase **Table Editor** under `tournaments`.
 
-## 4b. Storage bucket for background images
+## 4b. Storage bucket for images
 
 Needed only for the optional tournament background image. In the SQL editor:
 
@@ -100,11 +100,17 @@ create policy "bg admin delete" on storage.objects
   for delete to authenticated using (bucket_id = 'tournament-bg');
 ```
 
-The app shrinks the picture in your browser before uploading — max 1400px on
-the long edge, WebP where supported and JPEG otherwise — so a 10MB phone photo
-lands around 55–150KB. Only the resulting URL is stored on the tournament; the
-image bytes never enter the record that gets pushed to spectators on every
-score.
+This one bucket holds both the background image and the organiser logo — no
+extra setup for the logo.
+
+The app shrinks pictures in your browser before uploading. Backgrounds go to
+max 1400px on the long edge (WebP, or JPEG on Safari before 16.4), so a 10MB
+phone photo lands around 55–150KB. Logos go to max 320px and keep their
+transparency — WebP, falling back to PNG rather than JPEG, which would fill a
+transparent cut-out with black. A typical logo ends up around 5KB.
+
+Only the resulting URLs are stored on the tournament; image bytes never enter
+the record that gets pushed to spectators on every score.
 
 ## 5. Keep the free Supabase project awake
 

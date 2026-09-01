@@ -103,34 +103,47 @@ const POLL_MS = 15000;
    12MP phone photo costs a spectator ~100KB, not ~6MB.
 ------------------------------------------------------------------ */
 const BG_BUCKET = "tournament-bg";
-const BG_MAX_DIM = 1400;   // plenty behind a 90% dark veil
-const BG_QUALITY = 0.62;
 
-/** Downscale and re-encode, preferring WebP and falling back to JPEG. */
-async function shrinkImage(file) {
+const IMAGE_KINDS = {
+  // A backdrop sits behind a 90% dark veil, so it can be compressed hard.
+  bg: { maxDim: 1400, quality: 0.62, alpha: false, prefix: "bg" },
+  // A logo is drawn ~30px tall, but must keep its transparency — a JPEG
+  // fallback would fill the cut-out with black.
+  logo: { maxDim: 320, quality: 0.9, alpha: true, prefix: "logo" },
+};
+
+const EXT = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" };
+
+/** Downscale and re-encode, preferring WebP for size. */
+async function shrinkImage(file, kind) {
+  const k = IMAGE_KINDS[kind];
   const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, BG_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+  const scale = Math.min(1, k.maxDim / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
   const h = Math.max(1, Math.round(bitmap.height * scale));
 
   const canvas = document.createElement("canvas");
   canvas.width = w; canvas.height = h;
+  // Left transparent, so a logo's cut-out survives the round trip.
   canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
 
-  const encode = (type) => new Promise((res) => canvas.toBlob(res, type, BG_QUALITY));
-  // Safari only learned canvas WebP in 16.4; anything older silently hands
-  // back a PNG, which would be far bigger than the original.
+  const encode = (type) => new Promise((res) => canvas.toBlob(res, type, k.quality));
+  // Safari only learned canvas WebP in 16.4; older versions quietly hand back
+  // a PNG. That's the right fallback for a logo, but far too big for a photo.
   let blob = await encode("image/webp");
-  if (!blob || blob.type !== "image/webp") blob = await encode("image/jpeg");
+  if (!blob || blob.type !== "image/webp") {
+    blob = k.alpha
+      ? (blob && blob.type === "image/png" ? blob : await encode("image/png"))
+      : await encode("image/jpeg");
+  }
   return blob;
 }
 
-async function uploadBackground(file) {
-  const blob = await shrinkImage(file);
+async function uploadImage(file, kind) {
+  const blob = await shrinkImage(file, kind);
   if (!blob) throw new Error("Could not read that image.");
-  const ext = blob.type === "image/webp" ? "webp" : "jpg";
-  const path = `bg-${Date.now()}-${uid()}.${ext}`;
+  const path = `${IMAGE_KINDS[kind].prefix}-${Date.now()}-${uid()}.${EXT[blob.type] || "bin"}`;
   const { error } = await supabase.storage
     .from(BG_BUCKET).upload(path, blob, { contentType: blob.type, cacheControl: "31536000" });
   if (error) throw error;
@@ -709,6 +722,11 @@ export default function App() {
           width: 5, alignSelf: "stretch",
           background: `linear-gradient(${C.magenta}, ${C.cyan})`, transform: "skewX(-9deg)",
         }} />
+        {t.logoUrl && (
+          <img src={t.logoUrl} alt="" style={{
+            height: 32, width: "auto", maxWidth: 72, objectFit: "contain", flexShrink: 0,
+          }} />
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="bx-d" style={{
             fontSize: 22, fontWeight: 800, whiteSpace: "nowrap", lineHeight: 1.05,
@@ -810,13 +828,14 @@ export default function App() {
 }
 
 /* ================================================================== */
-/*  Background picker                                                  */
+/*  Image picker                                                       */
 /* ================================================================== */
 
-function BackgroundPicker({ value, onChange }) {
+function ImagePicker({ value, onChange, kind = "bg" }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
+  const isLogo = kind === "logo";
 
   const pick = async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -824,9 +843,9 @@ function BackgroundPicker({ value, onChange }) {
     if (!file) return;
     setErr(""); setNote(""); setBusy(true);
     try {
-      const url = await uploadBackground(file);
+      const url = await uploadImage(file, kind);
       onChange(url);
-      setNote(`Shrunk from ${(file.size / 1048576).toFixed(1)}MB before upload.`);
+      setNote(`Shrunk from ${(file.size / 1048576).toFixed(2)}MB before upload.`);
     } catch (ex) {
       console.error(ex);
       setErr(ex.message || "Upload failed. Check the storage bucket exists.");
@@ -840,7 +859,10 @@ function BackgroundPicker({ value, onChange }) {
         <div style={{
           width: 76, height: 52, borderRadius: 3, flexShrink: 0,
           border: `1px solid ${C.line}`,
-          background: value ? `url("${value}") center / cover no-repeat` : C.base,
+          // A logo is shown whole; a backdrop is shown as it will be cropped.
+          background: value
+            ? `url("${value}") center / ${isLogo ? "contain" : "cover"} no-repeat`
+            : C.base,
           display: "grid", placeItems: "center",
         }}>
           {!value && <ImageIcon size={17} color={C.line} />}
@@ -913,6 +935,7 @@ function Setup({ onCreate }) {
   const [third, setThird] = useState(true);
   const [points, setPoints] = useState(defaultPoints());
   const [bgUrl, setBgUrl] = useState(null);
+  const [logoUrl, setLogoUrl] = useState(null);
 
   const addPlayer = () => {
     const n = entry.trim();
@@ -938,7 +961,7 @@ function Setup({ onCreate }) {
     }));
     onCreate({
       name: name.trim(), players, groups, points, advance,
-      koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl,
+      koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl, logoUrl,
     });
   };
 
@@ -971,9 +994,14 @@ function Setup({ onCreate }) {
             placeholder="Xtreme Clash S2" />
         </Field>
 
+        <Field label="Organiser logo (optional)"
+          hint="Shown beside the tournament name in the header. A PNG with a transparent background looks best — transparency is kept.">
+          <ImagePicker kind="logo" value={logoUrl} onChange={setLogoUrl} />
+        </Field>
+
         <Field label="Background image (optional)"
           hint="Your event poster or a hall photo, faded far back behind the scoreboard. Resized in your browser before upload, so a big photo costs spectators nothing.">
-          <BackgroundPicker value={bgUrl} onChange={setBgUrl} />
+          <ImagePicker kind="bg" value={bgUrl} onChange={setBgUrl} />
         </Field>
 
         <Field label={`Bladers (${players.length})`}>
@@ -1794,9 +1822,15 @@ function SettingsSheet({ t, update, onClose, onReset }) {
             onChange={(e) => update((d) => { d.name = e.target.value; return d; })} />
         </Field>
 
+        <Field label="Organiser logo"
+          hint="Shown beside the tournament name. A PNG with a transparent background looks best — transparency is kept.">
+          <ImagePicker kind="logo" value={t.logoUrl || null}
+            onChange={(url) => update((d) => { d.logoUrl = url; return d; })} />
+        </Field>
+
         <Field label="Background image"
           hint="Faded far behind the scoreboard. Resized in your browser before upload, so spectators load about 100KB no matter how big the original is.">
-          <BackgroundPicker value={t.bgUrl || null}
+          <ImagePicker kind="bg" value={t.bgUrl || null}
             onChange={(url) => update((d) => { d.bgUrl = url; return d; })} />
         </Field>
 
