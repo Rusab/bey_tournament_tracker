@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
@@ -45,32 +45,54 @@ const uid = () => Math.random().toString(36).slice(2, 9);
    see SETUP.md.
 ------------------------------------------------------------------ */
 const store = {
-  async load() {
+  /** The whole row — the tournament plus the timestamp used to spot changes. */
+  async loadRow() {
     const { data, error } = await supabase
-      .from("tournaments").select("data").eq("id", ROW_ID).maybeSingle();
+      .from("tournaments").select("data, updated_at").eq("id", ROW_ID).maybeSingle();
     if (error) { console.error(error); return null; }
-    return data ? data.data : null;
+    return data || null;
   },
+
+  /**
+   * Just the timestamp — a few hundred bytes. Polling this instead of the whole
+   * tournament is what makes a safety-net poll affordable with a hall full of
+   * spectators: the 50KB board is only fetched when it has actually changed.
+   */
+  async stamp() {
+    const { data, error } = await supabase
+      .from("tournaments").select("updated_at").eq("id", ROW_ID).maybeSingle();
+    if (error) return null;
+    return data ? data.updated_at : null;
+  },
+
   async save(value) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("tournaments")
-      .upsert({ id: ROW_ID, data: value, updated_at: new Date().toISOString() });
-    if (error) { console.error(error); return false; }
-    return true;
+      .upsert({ id: ROW_ID, data: value, updated_at: new Date().toISOString() })
+      .select("updated_at").maybeSingle();
+    if (error) { console.error(error); return null; }
+    return data ? data.updated_at : null;
   },
-  // Spectators get pushed updates instead of polling. onStatus reports whether
-  // the realtime channel actually connected — if it didn't (realtime not enabled
-  // on the table, flaky network), the app falls back to a slow poll.
+
+  /**
+   * Realtime is the fast path, not the only path. onStatus reporting SUBSCRIBED
+   * means the socket opened — it does NOT prove row changes are being delivered
+   * (a table missing from the supabase_realtime publication connects happily and
+   * then says nothing), so the poll in App runs regardless.
+   */
   subscribe(onChange, onStatus) {
     const ch = supabase
       .channel("tournament")
       .on("postgres_changes",
           { event: "*", schema: "public", table: "tournaments", filter: `id=eq.${ROW_ID}` },
-          (payload) => { if (payload.new && payload.new.data) onChange(payload.new.data); })
+          (payload) => { if (payload.new && payload.new.data) onChange(payload.new.data, payload.new.updated_at); })
       .subscribe((status) => { if (onStatus) onStatus(status); });
     return () => supabase.removeChannel(ch);
   },
 };
+
+/** How often to ask "has anything changed?" when realtime is quiet. */
+const POLL_MS = 15000;
 
 /* ------------------------------------------------------------------
    Background image.
@@ -115,13 +137,24 @@ async function uploadBackground(file) {
   return supabase.storage.from(BG_BUCKET).getPublicUrl(path).data.publicUrl;
 }
 
-/** The arena background, optionally with a photo faded in behind it. */
-function arenaBgFor(url) {
-  if (!url) return arenaBg;
-  return `radial-gradient(115% 70% at 0% 0%, ${C.magenta}1F, transparent 58%),
-   radial-gradient(115% 70% at 100% 0%, ${C.cyan}1C, transparent 58%),
-   linear-gradient(${C.base}E8, ${C.base}E8),
-   url("${url}") center / cover no-repeat, ${C.base}`;
+/**
+ * The arena background as separate longhand properties. Deliberately not the
+ * `background` shorthand: mixing it with backgroundAttachment makes React warn,
+ * and the two fight each other across rerenders.
+ */
+function arenaStyle(url) {
+  const layers = url
+    // The dark veil sits above the photo — that's what fades it right back.
+    ? `${arenaBg}, linear-gradient(${C.base}E8, ${C.base}E8), url("${url}")`
+    : arenaBg;
+  return {
+    backgroundImage: layers,
+    backgroundColor: C.base,
+    backgroundAttachment: "fixed",
+    backgroundPosition: "center",
+    backgroundSize: "cover",
+    backgroundRepeat: "no-repeat",
+  };
 }
 
 const TABS = ["groups", "matches", "table", "bracket", "players"];
@@ -377,8 +410,10 @@ const C = {
 
 const GROUP_COLORS = [C.magenta, C.cyan, C.gold, C.green, "#A855F7", "#FF6B35", "#2DD4BF", "#F472B6"];
 
+/* Image layers only — the base colour is applied as backgroundColor, so these
+   can be composed with a tournament's photo without shorthand conflicts. */
 const arenaBg = `radial-gradient(115% 70% at 0% 0%, ${C.magenta}1F, transparent 58%),
-   radial-gradient(115% 70% at 100% 0%, ${C.cyan}1C, transparent 58%), ${C.base}`;
+   radial-gradient(115% 70% at 100% 0%, ${C.cyan}1C, transparent 58%)`;
 
 const Style = () => (
   <style>{`
@@ -406,7 +441,7 @@ const Style = () => (
   `}</style>
 );
 
-const shell = { background: arenaBg, backgroundAttachment: "fixed", color: C.ink, minHeight: "100vh" };
+const shell = { ...arenaStyle(null), color: C.ink, minHeight: "100vh" };
 
 const card = {
   background: C.surface,
@@ -523,10 +558,28 @@ export default function App() {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
   }, [tab]);
 
+  // What this device last wrote or accepted, so it can tell a genuine change
+  // from the echo of its own save coming back around.
+  const lastJson = useRef(null);
+  const lastStamp = useRef(null);
+
+  /** Take a version of the board from the server, unless it's our own echo. */
+  const applyIncoming = (incoming, stamp) => {
+    if (stamp) lastStamp.current = stamp;
+    const json = JSON.stringify(incoming);
+    if (json === lastJson.current) return;
+    lastJson.current = json; // adopt it, so we don't bounce it straight back
+    setT(incoming);
+  };
+
   useEffect(() => {
     (async () => {
-      const saved = await store.load();
-      if (saved) setT(saved);
+      const row = await store.loadRow();
+      if (row) {
+        lastStamp.current = row.updated_at;
+        lastJson.current = JSON.stringify(row.data);
+        setT(row.data);
+      }
       setLoaded(true);
     })();
 
@@ -541,47 +594,49 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Every device follows the board, admin phones included — scoring on the PC
+  // has to show up on the phone in your pocket. Only this device's own save is
+  // skipped, so an edit in progress is never stomped by its own echo.
   useEffect(() => {
-    // Spectators get pushed updates instead of polling; the admin's own
-    // edits stay authoritative so they don't get overwritten mid-edit.
     return store.subscribe(
-      (incoming) => { if (!isAdmin) setT(incoming); },
+      (incoming, stamp) => applyIncoming(incoming, stamp),
       (status) => setLive(status === "SUBSCRIBED")
     );
-  }, [isAdmin]);
+  }, []);
 
-  // Phones drop websockets when the screen locks or the tab goes background.
-  // Coming back into view re-reads once, so you never stare at a stale board.
+  // The safety net, and it runs even when realtime claims to be connected:
+  // a connected socket is not proof that row changes are being delivered.
+  // Checking the timestamp is cheap; the board is only pulled when it moved.
   useEffect(() => {
-    if (isAdmin) return;
-    const refresh = async () => {
+    if (!loaded) return;
+    const tick = async () => {
       if (document.visibilityState !== "visible") return;
-      const fresh = await store.load();
-      if (fresh) setT(fresh);
+      const stamp = await store.stamp();
+      if (!stamp || stamp === lastStamp.current) return;
+      const row = await store.loadRow();
+      if (row) applyIncoming(row.data, row.updated_at);
     };
-    document.addEventListener("visibilitychange", refresh);
-    window.addEventListener("focus", refresh);
+    const id = setInterval(tick, POLL_MS);
+    document.addEventListener("visibilitychange", tick); // phones kill sockets on lock
+    window.addEventListener("focus", tick);
     return () => {
-      document.removeEventListener("visibilitychange", refresh);
-      window.removeEventListener("focus", refresh);
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("focus", tick);
     };
-  }, [isAdmin]);
-
-  // Fallback only for when realtime never connected — a slow poll rather than
-  // a dead scoreboard. Costs nothing while the websocket is healthy.
-  useEffect(() => {
-    if (isAdmin || live) return;
-    const id = setInterval(async () => {
-      if (document.visibilityState !== "visible") return;
-      const fresh = await store.load();
-      if (fresh) setT(fresh);
-    }, 30000);
-    return () => clearInterval(id);
-  }, [isAdmin, live]);
+  }, [loaded]);
 
   useEffect(() => {
     if (!loaded || !t || !isAdmin) return;
-    store.save(t);
+    const json = JSON.stringify(t);
+    if (json === lastJson.current) return; // nothing actually changed
+    lastJson.current = json;
+    store.save(t).then((stamp) => {
+      if (stamp) lastStamp.current = stamp;
+      // Write failed: forget what we "saved" so the next edit tries again
+      // rather than sitting on a change the server never took.
+      else lastJson.current = null;
+    });
   }, [t, loaded, isAdmin]);
 
   const nameOf = useMemo(() => {
@@ -642,7 +697,7 @@ export default function App() {
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
 
   return (
-    <div className="bx" style={{ ...shell, background: arenaBgFor(t.bgUrl) }}>
+    <div className="bx" style={{ ...shell, ...arenaStyle(t.bgUrl) }}>
       <Style />
 
       <header style={{
@@ -660,13 +715,11 @@ export default function App() {
             overflow: "hidden", textOverflow: "ellipsis",
           }}>{t.name}</div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
-            {!isAdmin && (
-              <span title={live ? "Updating live" : "Reconnecting…"} style={{
-                width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-                background: live ? C.green : C.muted,
-                boxShadow: live ? `0 0 6px ${C.green}` : "none",
-              }} />
-            )}
+            <span title={live ? "Updating live" : "Checking every few seconds"} style={{
+              width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+              background: live ? C.green : C.gold,
+              boxShadow: live ? `0 0 6px ${C.green}` : "none",
+            }} />
             <span>{t.players.length} bladers · {t.groups.length} group{t.groups.length > 1 ? "s" : ""} · top {t.advance} advance</span>
           </div>
         </div>
@@ -890,7 +943,7 @@ function Setup({ onCreate }) {
   };
 
   return (
-    <div className="bx" style={{ ...shell, background: arenaBgFor(bgUrl) }}>
+    <div className="bx" style={{ ...shell, ...arenaStyle(bgUrl) }}>
       <div style={{ maxWidth: 620, margin: "0 auto", padding: "44px 18px 70px" }}>
 
         <div className="bx-enter" style={{ marginBottom: 30 }}>
@@ -1433,8 +1486,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
-      backgroundAttachment: "fixed", overflowY: "auto",
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
@@ -1611,8 +1663,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
 
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
-      backgroundAttachment: "fixed", overflowY: "auto",
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
@@ -1724,8 +1775,7 @@ function SettingsSheet({ t, update, onClose, onReset }) {
   const [confirm, setConfirm] = useState(false);
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
-      backgroundAttachment: "fixed", overflowY: "auto",
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
