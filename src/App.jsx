@@ -46,17 +46,31 @@ const store = {
     if (error) { console.error(error); return false; }
     return true;
   },
-  // Spectators get pushed updates instead of polling.
-  subscribe(onChange) {
+  // Spectators get pushed updates instead of polling. onStatus reports whether
+  // the realtime channel actually connected — if it didn't (realtime not enabled
+  // on the table, flaky network), the app falls back to a slow poll.
+  subscribe(onChange, onStatus) {
     const ch = supabase
       .channel("tournament")
       .on("postgres_changes",
           { event: "*", schema: "public", table: "tournaments", filter: `id=eq.${ROW_ID}` },
-          (payload) => onChange(payload.new.data))
-      .subscribe();
+          (payload) => { if (payload.new && payload.new.data) onChange(payload.new.data); })
+      .subscribe((status) => { if (onStatus) onStatus(status); });
     return () => supabase.removeChannel(ch);
   },
 };
+
+const TABS = ["groups", "matches", "table", "bracket", "players"];
+const TAB_KEY = "bx:tab";
+
+/** Last tab this device was on, so a refresh doesn't bounce you to Groups. */
+function initialTab() {
+  try {
+    const saved = localStorage.getItem(TAB_KEY);
+    if (TABS.includes(saved)) return saved;
+  } catch (e) { /* private mode */ }
+  return "table";
+}
 
 function scoreOf(m) {
   let s1 = 0, s2 = 0;
@@ -318,6 +332,12 @@ const Style = () => (
     @keyframes bx-clash { from { opacity: 0; transform: translateY(14px) skewX(-9deg); }
                           to   { opacity: 1; transform: translateY(0) skewX(-9deg); } }
     .bx-enter { animation: bx-clash .5s cubic-bezier(.16,1,.3,1) both; }
+    /* Undo sits in the sheet header on desktop, but within thumb reach on phones. */
+    .bx-undo-fab { display: none; }
+    @media (max-width: 640px) {
+      .bx-undo-fab { display: inline-flex; }
+      .bx-undo-head { display: none; }
+    }
     @media (prefers-reduced-motion: reduce) { .bx *, .bx-enter { animation: none !important; transition: none !important; } }
   `}</style>
 );
@@ -426,13 +446,18 @@ function EmptyState({ title, body }) {
 export default function App() {
   const [t, setT] = useState(null);
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState("groups");
+  const [tab, setTab] = useState(initialTab);
   const [scoring, setScoring] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [role, setRole] = useState("spectator");
   const [showGate, setShowGate] = useState(false);
+  const [live, setLive] = useState(false);
   const isAdmin = role === "admin";
+
+  useEffect(() => {
+    try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
+  }, [tab]);
 
   useEffect(() => {
     (async () => {
@@ -455,10 +480,40 @@ export default function App() {
   useEffect(() => {
     // Spectators get pushed updates instead of polling; the admin's own
     // edits stay authoritative so they don't get overwritten mid-edit.
-    return store.subscribe((incoming) => {
-      if (!isAdmin) setT(incoming);
-    });
+    return store.subscribe(
+      (incoming) => { if (!isAdmin) setT(incoming); },
+      (status) => setLive(status === "SUBSCRIBED")
+    );
   }, [isAdmin]);
+
+  // Phones drop websockets when the screen locks or the tab goes background.
+  // Coming back into view re-reads once, so you never stare at a stale board.
+  useEffect(() => {
+    if (isAdmin) return;
+    const refresh = async () => {
+      if (document.visibilityState !== "visible") return;
+      const fresh = await store.load();
+      if (fresh) setT(fresh);
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [isAdmin]);
+
+  // Fallback only for when realtime never connected — a slow poll rather than
+  // a dead scoreboard. Costs nothing while the websocket is healthy.
+  useEffect(() => {
+    if (isAdmin || live) return;
+    const id = setInterval(async () => {
+      if (document.visibilityState !== "visible") return;
+      const fresh = await store.load();
+      if (fresh) setT(fresh);
+    }, 30000);
+    return () => clearInterval(id);
+  }, [isAdmin, live]);
 
   useEffect(() => {
     if (!loaded || !t || !isAdmin) return;
@@ -541,6 +596,13 @@ export default function App() {
             overflow: "hidden", textOverflow: "ellipsis",
           }}>{t.name}</div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
+            {!isAdmin && (
+              <span title={live ? "Updating live" : "Reconnecting…"} style={{
+                width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                background: live ? C.green : C.muted,
+                boxShadow: live ? `0 0 6px ${C.green}` : "none",
+              }} />
+            )}
             <span>{t.players.length} bladers · {t.groups.length} group{t.groups.length > 1 ? "s" : ""} · top {t.advance} advance</span>
           </div>
         </div>
@@ -1251,11 +1313,32 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <div style={{ fontSize: 11.5, color: C.muted }}>{stageLabel}</div>
         </div>
         <Btn onClick={() => setEvents([])} tone="ghost" style={{ padding: "7px 11px" }}>Reset</Btn>
-        <Btn onClick={() => setEvents((v) => v.slice(0, -1))} tone="ghost" disabled={!events.length}
-          style={{ padding: "7px 11px" }} aria-label="Undo last finish"><Undo2 size={15} /></Btn>
+        <span className="bx-undo-head">
+          <Btn onClick={() => setEvents((v) => v.slice(0, -1))} tone="ghost" disabled={!events.length}
+            style={{ padding: "7px 11px" }} aria-label="Undo last finish"><Undo2 size={15} /></Btn>
+        </span>
       </div>
 
-      <div style={{ padding: 16, maxWidth: 720, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
+      {events.length > 0 && (
+        <button
+          onClick={() => setEvents((v) => v.slice(0, -1))}
+          className="bx-d bx-undo-fab" aria-label="Undo last finish"
+          style={{
+            position: "fixed", left: "50%", transform: "translateX(-50%)",
+            bottom: "calc(env(safe-area-inset-bottom) + 24px)", zIndex: 70,
+            alignItems: "center", gap: 8, padding: "14px 26px", borderRadius: 999,
+            background: C.raised, color: C.ink, border: `1px solid ${C.line}`,
+            fontSize: 16, fontWeight: 700, cursor: "pointer",
+            boxShadow: "0 8px 24px #00000077",
+          }}>
+          <Undo2 size={17} />Undo
+        </button>
+      )}
+
+      <div style={{
+        padding: "16px 16px 110px", maxWidth: 720, margin: "0 auto",
+        width: "100%", boxSizing: "border-box",
+      }}>
         <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
           <Side side={1} color={C.magenta} />
           <div className="bx-d" style={{
