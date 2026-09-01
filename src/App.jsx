@@ -718,15 +718,15 @@ export default function App() {
         borderBottom: `1px solid ${C.line}`, padding: "13px 16px",
         display: "flex", alignItems: "center", gap: 12,
       }}>
+        {t.logoUrl && (
+          <img src={t.logoUrl} alt="" style={{
+            height: 56, width: "auto", maxWidth: 126, objectFit: "contain", flexShrink: 0,
+          }} />
+        )}
         <div style={{
           width: 5, alignSelf: "stretch",
           background: `linear-gradient(${C.magenta}, ${C.cyan})`, transform: "skewX(-9deg)",
         }} />
-        {t.logoUrl && (
-          <img src={t.logoUrl} alt="" style={{
-            height: 32, width: "auto", maxWidth: 72, objectFit: "contain", flexShrink: 0,
-          }} />
-        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="bx-d" style={{
             fontSize: 22, fontWeight: 800, whiteSpace: "nowrap", lineHeight: 1.05,
