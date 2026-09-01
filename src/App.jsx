@@ -444,6 +444,14 @@ const Style = () => (
     @keyframes bx-clash { from { opacity: 0; transform: translateY(14px) skewX(-9deg); }
                           to   { opacity: 1; transform: translateY(0) skewX(-9deg); } }
     .bx-enter { animation: bx-clash .5s cubic-bezier(.16,1,.3,1) both; }
+    /* Tab changes slide in from the side you came from, so a swipe feels
+       connected to the thing it moved. */
+    @keyframes bx-tab-next { from { opacity: 0; transform: translate3d(26px,0,0); }
+                             to   { opacity: 1; transform: translate3d(0,0,0); } }
+    @keyframes bx-tab-prev { from { opacity: 0; transform: translate3d(-26px,0,0); }
+                             to   { opacity: 1; transform: translate3d(0,0,0); } }
+    .bx-tab-next { animation: bx-tab-next .2s cubic-bezier(.16,1,.3,1) both; }
+    .bx-tab-prev { animation: bx-tab-prev .2s cubic-bezier(.16,1,.3,1) both; }
     /* Undo sits in the sheet header on desktop, but within thumb reach on phones. */
     .bx-undo-fab { display: none; }
     @media (max-width: 640px) {
@@ -609,6 +617,18 @@ function inHorizontalScroller(el) {
   return false;
 }
 
+/**
+ * True if the touch began inside a sheet, dialog or the bottom bar. They are
+ * all position:fixed and are DOM children of the board, so without this a
+ * swipe inside the score sheet would flip the tab behind it.
+ */
+function inOverlay(el, root) {
+  for (let n = el; n && n !== root; n = n.parentElement) {
+    if (getComputedStyle(n).position === "fixed") return true;
+  }
+  return false;
+}
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -633,6 +653,7 @@ export default function App() {
   const [role, setRole] = useState("spectator");
   const [showGate, setShowGate] = useState(false);
   const [live, setLive] = useState(false);
+  const [slide, setSlide] = useState(null); // direction of the last tab change
   const isAdmin = role === "admin";
 
   useEffect(() => {
@@ -726,14 +747,24 @@ export default function App() {
     return (id) => map[id] || "—";
   }, [t]);
 
+  /** Change tab, remembering which way we travelled so the view can slide in. */
+  const goTab = (next) => {
+    if (next === tab) return;
+    setSlide(TABS.indexOf(next) > TABS.indexOf(tab) ? "next" : "prev");
+    setTab(next);
+  };
+
   // Swipe left/right across the board to change tabs. Measured on touchend
   // only — nothing is preventDefault-ed, so vertical scrolling stays native.
+  // Bound to the full-height root, not <main>: a short page (an unbuilt
+  // bracket, say) leaves most of the screen outside <main> entirely.
   const swipe = useRef(null);
 
   const onTouchStart = (e) => {
     const p = e.touches.length === 1 ? e.touches[0] : null;
     swipe.current =
       p && p.clientX > SWIPE_EDGE && p.clientX < window.innerWidth - SWIPE_EDGE
+        && !inOverlay(e.target, e.currentTarget)
         && !inHorizontalScroller(e.target)
         ? { x: p.clientX, y: p.clientY, at: Date.now() }
         : null;
@@ -751,7 +782,7 @@ export default function App() {
     if (Math.abs(dx) < Math.abs(dy) * SWIPE_X_OVER_Y) return; // a scroll, not a swipe
 
     const next = TABS.indexOf(tab) + (dx < 0 ? 1 : -1);
-    if (next >= 0 && next < TABS.length) setTab(TABS[next]); // no wrap-around
+    if (next >= 0 && next < TABS.length) goTab(TABS[next]); // no wrap-around
   };
 
   if (!loaded) {
@@ -806,7 +837,8 @@ export default function App() {
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
 
   return (
-    <div className="bx" style={{ ...shell, ...arenaStyle(t.bgUrl) }}>
+    <div className="bx" style={{ ...shell, ...arenaStyle(t.bgUrl) }}
+      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
       <Style />
 
       <header style={{
@@ -859,17 +891,17 @@ export default function App() {
         )}
       </header>
 
-      <main
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-        style={{ padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto" }}>
-        {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
-        {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
-          onScore={(id) => setScoring({ kind: "group", id })} />}
-        {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin} onPlayer={setDetail} />}
-        {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
-          onScore={(id) => setScoring({ kind: "ko", id })} />}
-        {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
+      <main style={{ padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto" }}>
+        {/* Keyed on the tab so the entrance animation restarts on every change. */}
+        <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
+          {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
+          {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
+            onScore={(id) => setScoring({ kind: "group", id })} />}
+          {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin} onPlayer={setDetail} />}
+          {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
+            onScore={(id) => setScoring({ kind: "ko", id })} />}
+          {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
+        </div>
       </main>
 
       <nav style={{
@@ -887,7 +919,7 @@ export default function App() {
         ].map(([k, Icon, label]) => {
           const on = tab === k;
           return (
-            <button key={k} onClick={() => setTab(k)}
+            <button key={k} onClick={() => goTab(k)}
               style={{
                 background: "none", border: "none", cursor: "pointer", position: "relative",
                 padding: "11px 4px 13px", color: on ? C.magenta : C.muted,
