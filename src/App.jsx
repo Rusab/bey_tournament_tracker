@@ -186,6 +186,8 @@ function Backdrop({ url }) {
 
 const TABS = ["groups", "matches", "table", "bracket", "players"];
 const TAB_KEY = "bx:tab";
+const GROUP_KEY = "bx:group";
+const ALL_GROUPS = "all";
 
 /** Last tab this device was on, so a refresh doesn't bounce you to Groups. */
 function initialTab() {
@@ -194,6 +196,33 @@ function initialTab() {
     if (TABS.includes(saved)) return saved;
   } catch (e) { /* private mode */ }
   return "table";
+}
+
+function initialGroup() {
+  try { return localStorage.getItem(GROUP_KEY) || ALL_GROUPS; }
+  catch (e) { return ALL_GROUPS; }
+}
+
+/**
+ * Filter for which group to show. One choice shared by Matches and Standings,
+ * so running Group B means both tabs stay on Group B.
+ */
+function GroupPicker({ t, value, onChange }) {
+  if (t.groups.length < 2) return null;
+  const i = t.groups.findIndex((g) => g.id === value);
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <Segmented
+        value={value} onChange={onChange}
+        tone={i >= 0 ? GROUP_COLORS[i % GROUP_COLORS.length] : C.magenta}
+        options={[
+          { value: ALL_GROUPS, label: "All" },
+          // "Group A" reads as just "A" here; the section below spells it out.
+          ...t.groups.map((g) => ({ value: g.id, label: g.name.replace(/^group\s+/i, "") })),
+        ]}
+      />
+    </div>
+  );
 }
 
 function scoreOf(m) {
@@ -679,11 +708,23 @@ export default function App() {
   const [showGate, setShowGate] = useState(false);
   const [live, setLive] = useState(false);
   const [slide, setSlide] = useState(null); // direction of the last tab change
+  const [group, setGroup] = useState(initialGroup);
   const isAdmin = role === "admin";
 
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
   }, [tab]);
+
+  useEffect(() => {
+    try { localStorage.setItem(GROUP_KEY, group); } catch (e) { /* private mode */ }
+  }, [group]);
+
+  // A remembered group id can outlive the tournament it belonged to — after a
+  // redraw or a fresh setup the ids differ, and the filter would hide the lot.
+  useEffect(() => {
+    if (!t || group === ALL_GROUPS) return;
+    if (!t.groups.some((g) => g.id === group)) setGroup(ALL_GROUPS);
+  }, [t, group]);
 
   // What this device last wrote or accepted, so it can tell a genuine change
   // from the echo of its own save coming back around.
@@ -935,8 +976,10 @@ export default function App() {
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
           {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
           {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
+            group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
-          {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin} onPlayer={setDetail} />}
+          {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin}
+            group={group} setGroup={setGroup} onPlayer={setDetail} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
             onScore={(id) => setScoring({ kind: "ko", id })} />}
           {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
@@ -1403,7 +1446,7 @@ function Chip({ children, onClick, active }) {
 /*  Matches                                                            */
 /* ================================================================== */
 
-function MatchesView({ t, nameOf, onScore, isAdmin }) {
+function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
   if (!t.groupMatches.length) {
     return <EmptyState title="No fixtures yet"
       body="Make the group draw first — fixtures build themselves as soon as bladers are in groups." />;
@@ -1412,7 +1455,10 @@ function MatchesView({ t, nameOf, onScore, isAdmin }) {
     <div>
       <SectionHead title="Group matches"
         sub={`Everyone plays everyone in their group, first to ${t.points.group}.` + (isAdmin ? " Tap a match to score it." : "")} />
+      <GroupPicker t={t} value={group} onChange={setGroup} />
+      {/* Indexed over every group, not the filtered set, so each keeps its colour. */}
       {t.groups.map((g, gi) => {
+        if (group !== ALL_GROUPS && g.id !== group) return null;
         const ms = t.groupMatches.filter((m) => m.groupId === g.id);
         if (!ms.length) return null;
         const done = ms.filter((m) => m.done).length;
@@ -1471,7 +1517,7 @@ function MatchRow({ m, nameOf, onClick, label, locked }) {
 /*  Standings                                                          */
 /* ================================================================== */
 
-function TableView({ t, nameOf, update, onPlayer, isAdmin }) {
+function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
   const [ask, setAsk] = useState(false);
 
@@ -1498,8 +1544,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin }) {
     <div>
       <SectionHead title="Standings" color={C.cyan}
         sub="Ranked by wins, then by total margin across won matches only. Tap a name for that blader's record." />
+      <GroupPicker t={t} value={group} onChange={setGroup} />
 
       {t.groups.map((g, gi) => {
+        if (group !== ALL_GROUPS && g.id !== group) return null;
         const ms = t.groupMatches.filter((m) => m.groupId === g.id);
         const rows = computeStandings(g.playerIds, ms, nameOf);
         const col = GROUP_COLORS[gi % GROUP_COLORS.length];
