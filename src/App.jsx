@@ -777,6 +777,10 @@ export default function App() {
     if (next === tab) return;
     setSlide(TABS.indexOf(next) > TABS.indexOf(tab) ? "next" : "prev");
     setTab(next);
+    // Land at the top of the new tab. Besides being the expected behaviour, it
+    // stops the browser having to clamp a scroll position that no longer fits
+    // a shorter page — a clamp mid-animation visibly shunts the fixed bars.
+    window.scrollTo(0, 0);
   };
 
   // Swipe left/right across the board to change tabs. Measured on touchend
@@ -869,9 +873,6 @@ export default function App() {
 
       <header style={{
         position: "sticky", top: 0, zIndex: 20, background: C.base,
-        // Own compositor layer: the bar is then moved by the compositor rather
-        // than repainted with the page, which is what stops it drifting.
-        transform: "translateZ(0)", willChange: "transform",
         borderBottom: `1px solid ${C.line}`, padding: "13px 16px",
         display: "flex", alignItems: "center", gap: 12,
       }}>
@@ -923,6 +924,12 @@ export default function App() {
       <main style={{
         padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto",
         position: "relative", zIndex: 1, // above the fixed backdrop
+        // The sliding content must never reach the page's scroll geometry:
+        // a sideways overflow, even a clipped one, is enough to make the
+        // browser re-place the fixed bottom bar mid-animation. "clip" rather
+        // than "hidden" so it does not become a scroll container and break
+        // the sticky bars. -y visible keeps the page scrolling normally.
+        overflowX: "clip", overflowY: "visible",
       }}>
         {/* Keyed on the tab so the entrance animation restarts on every change. */}
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
@@ -941,7 +948,6 @@ export default function App() {
         background: C.surface, borderTop: `1px solid ${C.line}`,
         display: "grid", gridTemplateColumns: "repeat(5,1fr)",
         paddingBottom: "env(safe-area-inset-bottom)",
-        transform: "translateZ(0)", willChange: "transform",
       }}>
         {[
           ["groups", Users, "Groups"],
