@@ -80,6 +80,32 @@ Open the URL it prints, tap "I'm the organiser," and sign in with the admin
 account from step 2. Create a test tournament and confirm it appears in the
 Supabase **Table Editor** under `tournaments`.
 
+## 4b. Storage bucket for background images
+
+Needed only for the optional tournament background image. In the SQL editor:
+
+```sql
+insert into storage.buckets (id, name, public)
+values ('tournament-bg', 'tournament-bg', true)
+on conflict (id) do nothing;
+
+-- Public bucket, so reads work without a policy. Writes stay admin-only.
+create policy "bg admin insert" on storage.objects
+  for insert to authenticated with check (bucket_id = 'tournament-bg');
+
+create policy "bg admin update" on storage.objects
+  for update to authenticated using (bucket_id = 'tournament-bg');
+
+create policy "bg admin delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'tournament-bg');
+```
+
+The app shrinks the picture in your browser before uploading — max 1400px on
+the long edge, WebP where supported and JPEG otherwise — so a 10MB phone photo
+lands around 55–150KB. Only the resulting URL is stored on the tournament; the
+image bytes never enter the record that gets pushed to spectators on every
+score.
+
 ## 5. Keep the free Supabase project awake
 
 Free projects pause after 7 days of no requests. Point a free

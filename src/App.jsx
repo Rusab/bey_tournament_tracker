@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
+  Image as ImageIcon,
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -70,6 +71,58 @@ const store = {
     return () => supabase.removeChannel(ch);
   },
 };
+
+/* ------------------------------------------------------------------
+   Background image.
+
+   The picture never goes into the tournament record — that blob is
+   re-sent to every spectator on every score, so only the URL lives
+   there. It is also shrunk in the browser before it is uploaded, so a
+   12MP phone photo costs a spectator ~100KB, not ~6MB.
+------------------------------------------------------------------ */
+const BG_BUCKET = "tournament-bg";
+const BG_MAX_DIM = 1400;   // plenty behind a 90% dark veil
+const BG_QUALITY = 0.62;
+
+/** Downscale and re-encode, preferring WebP and falling back to JPEG. */
+async function shrinkImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, BG_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+
+  const encode = (type) => new Promise((res) => canvas.toBlob(res, type, BG_QUALITY));
+  // Safari only learned canvas WebP in 16.4; anything older silently hands
+  // back a PNG, which would be far bigger than the original.
+  let blob = await encode("image/webp");
+  if (!blob || blob.type !== "image/webp") blob = await encode("image/jpeg");
+  return blob;
+}
+
+async function uploadBackground(file) {
+  const blob = await shrinkImage(file);
+  if (!blob) throw new Error("Could not read that image.");
+  const ext = blob.type === "image/webp" ? "webp" : "jpg";
+  const path = `bg-${Date.now()}-${uid()}.${ext}`;
+  const { error } = await supabase.storage
+    .from(BG_BUCKET).upload(path, blob, { contentType: blob.type, cacheControl: "31536000" });
+  if (error) throw error;
+  return supabase.storage.from(BG_BUCKET).getPublicUrl(path).data.publicUrl;
+}
+
+/** The arena background, optionally with a photo faded in behind it. */
+function arenaBgFor(url) {
+  if (!url) return arenaBg;
+  return `radial-gradient(115% 70% at 0% 0%, ${C.magenta}1F, transparent 58%),
+   radial-gradient(115% 70% at 100% 0%, ${C.cyan}1C, transparent 58%),
+   linear-gradient(${C.base}E8, ${C.base}E8),
+   url("${url}") center / cover no-repeat, ${C.base}`;
+}
 
 const TABS = ["groups", "matches", "table", "bracket", "players"];
 const TAB_KEY = "bx:tab";
@@ -589,7 +642,7 @@ export default function App() {
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
 
   return (
-    <div className="bx" style={shell}>
+    <div className="bx" style={{ ...shell, background: arenaBgFor(t.bgUrl) }}>
       <Style />
 
       <header style={{
@@ -704,6 +757,64 @@ export default function App() {
 }
 
 /* ================================================================== */
+/*  Background picker                                                  */
+/* ================================================================== */
+
+function BackgroundPicker({ value, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+
+  const pick = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // so picking the same file twice still fires
+    if (!file) return;
+    setErr(""); setNote(""); setBusy(true);
+    try {
+      const url = await uploadBackground(file);
+      onChange(url);
+      setNote(`Shrunk from ${(file.size / 1048576).toFixed(1)}MB before upload.`);
+    } catch (ex) {
+      console.error(ex);
+      setErr(ex.message || "Upload failed. Check the storage bucket exists.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{
+          width: 76, height: 52, borderRadius: 3, flexShrink: 0,
+          border: `1px solid ${C.line}`,
+          background: value ? `url("${value}") center / cover no-repeat` : C.base,
+          display: "grid", placeItems: "center",
+        }}>
+          {!value && <ImageIcon size={17} color={C.line} />}
+        </div>
+
+        <label style={{
+          display: "inline-flex", alignItems: "center", gap: 7, cursor: busy ? "wait" : "pointer",
+          background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3,
+          padding: "10px 15px", fontSize: 15, fontWeight: 700, opacity: busy ? 0.5 : 1,
+        }} className="bx-d">
+          <ImageIcon size={15} />
+          {busy ? "Uploading…" : value ? "Replace" : "Choose image"}
+          <input type="file" accept="image/*" onChange={pick} disabled={busy}
+            style={{ display: "none" }} />
+        </label>
+
+        {value && !busy && (
+          <Btn onClick={() => { onChange(null); setNote(""); }} tone="ghost">Remove</Btn>
+        )}
+      </div>
+      {note && <div style={{ color: C.green, fontSize: 12.5, marginTop: 8 }}>{note}</div>}
+      {err && <div style={{ color: C.magenta, fontSize: 12.5, marginTop: 8 }}>{err}</div>}
+    </div>
+  );
+}
+
+/* ================================================================== */
 /*  Stage points editor                                                */
 /* ================================================================== */
 
@@ -748,6 +859,7 @@ function Setup({ onCreate }) {
   const [koSize, setKoSize] = useState(8);
   const [third, setThird] = useState(true);
   const [points, setPoints] = useState(defaultPoints());
+  const [bgUrl, setBgUrl] = useState(null);
 
   const addPlayer = () => {
     const n = entry.trim();
@@ -773,12 +885,12 @@ function Setup({ onCreate }) {
     }));
     onCreate({
       name: name.trim(), players, groups, points, advance,
-      koSize, thirdPlace: third, groupMatches: [], bracket: null,
+      koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl,
     });
   };
 
   return (
-    <div className="bx" style={shell}>
+    <div className="bx" style={{ ...shell, background: arenaBgFor(bgUrl) }}>
       <div style={{ maxWidth: 620, margin: "0 auto", padding: "44px 18px 70px" }}>
 
         <div className="bx-enter" style={{ marginBottom: 30 }}>
@@ -804,6 +916,11 @@ function Setup({ onCreate }) {
         <Field label="Tournament name">
           <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)}
             placeholder="Xtreme Clash S2" />
+        </Field>
+
+        <Field label="Background image (optional)"
+          hint="Your event poster or a hall photo, faded far back behind the scoreboard. Resized in your browser before upload, so a big photo costs spectators nothing.">
+          <BackgroundPicker value={bgUrl} onChange={setBgUrl} />
         </Field>
 
         <Field label={`Bladers (${players.length})`}>
@@ -1316,7 +1433,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBg,
+      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
       backgroundAttachment: "fixed", overflowY: "auto",
     }}>
       <div style={{
@@ -1494,7 +1611,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
 
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBg,
+      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
       backgroundAttachment: "fixed", overflowY: "auto",
     }}>
       <div style={{
@@ -1607,7 +1724,7 @@ function SettingsSheet({ t, update, onClose, onReset }) {
   const [confirm, setConfirm] = useState(false);
   return (
     <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 60, background: arenaBg,
+      position: "fixed", inset: 0, zIndex: 60, background: arenaBgFor(t.bgUrl),
       backgroundAttachment: "fixed", overflowY: "auto",
     }}>
       <div style={{
@@ -1625,6 +1742,12 @@ function SettingsSheet({ t, update, onClose, onReset }) {
         <Field label="Tournament name">
           <input style={inputStyle} value={t.name}
             onChange={(e) => update((d) => { d.name = e.target.value; return d; })} />
+        </Field>
+
+        <Field label="Background image"
+          hint="Faded far behind the scoreboard. Resized in your browser before upload, so spectators load about 100KB no matter how big the original is.">
+          <BackgroundPicker value={t.bgUrl || null}
+            onChange={(url) => update((d) => { d.bgUrl = url; return d; })} />
         </Field>
 
         <Field label="Points to win a match"
