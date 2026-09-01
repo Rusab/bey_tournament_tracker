@@ -163,11 +163,25 @@ function arenaStyle(url) {
   return {
     backgroundImage: layers,
     backgroundColor: C.base,
-    backgroundAttachment: "fixed",
+    // Deliberately NOT background-attachment: fixed. On mobile that repaints a
+    // viewport-sized background on every scroll frame, and the sticky header
+    // and bottom bar visibly lag behind the scroll as a result. The board keeps
+    // a still backdrop by painting it into a fixed layer instead — see Backdrop.
+    backgroundAttachment: "scroll",
     backgroundPosition: "center",
     backgroundSize: "cover",
     backgroundRepeat: "no-repeat",
   };
+}
+
+/** The still arena backdrop, as its own compositor layer behind everything. */
+function Backdrop({ url }) {
+  return (
+    <div aria-hidden="true" style={{
+      position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none",
+      ...arenaStyle(url),
+    }} />
+  );
 }
 
 const TABS = ["groups", "matches", "table", "bracket", "players"];
@@ -431,7 +445,12 @@ const arenaBg = `radial-gradient(115% 70% at 0% 0%, ${C.magenta}1F, transparent 
 const Style = () => (
   <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600;700&display=swap');
+    /* Rubber-band scrolling drags fixed bars with it, so switch it off. */
+    html, body { overscroll-behavior: none; }
     .bx { font-family: 'Barlow', system-ui, sans-serif; }
+    /* dvh follows the browser chrome as it collapses; vh does not, which leaves
+       the page taller than the screen and the bottom bar adrift. */
+    .bx { min-height: 100dvh; }
     .bx-d { font-family: 'Saira Condensed', 'Barlow', sans-serif; letter-spacing: .015em; }
     .bx-slant { transform: skewX(-9deg); }
     .bx *::-webkit-scrollbar { height: 6px; width: 6px; }
@@ -450,8 +469,14 @@ const Style = () => (
                              to   { opacity: 1; transform: translate3d(0,0,0); } }
     @keyframes bx-tab-prev { from { opacity: 0; transform: translate3d(-26px,0,0); }
                              to   { opacity: 1; transform: translate3d(0,0,0); } }
-    .bx-tab-next { animation: bx-tab-next .2s cubic-bezier(.16,1,.3,1) both; }
-    .bx-tab-prev { animation: bx-tab-prev .2s cubic-bezier(.16,1,.3,1) both; }
+    /* No fill-mode on purpose. "both" would leave the end transform applied
+       forever, and a transformed ancestor becomes the containing block for any
+       position:fixed child, misplacing the dialogs. "backwards" is worse still:
+       if the animation is throttled — a backgrounded tab — the content sits at
+       the opening frame, invisible. With no fill, anything other than "playing"
+       shows the content exactly as it normally looks. */
+    .bx-tab-next { animation: bx-tab-next .2s cubic-bezier(.16,1,.3,1); }
+    .bx-tab-prev { animation: bx-tab-prev .2s cubic-bezier(.16,1,.3,1); }
     /* Undo sits in the sheet header on desktop, but within thumb reach on phones. */
     .bx-undo-fab { display: none; }
     @media (max-width: 640px) {
@@ -837,12 +862,16 @@ export default function App() {
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
 
   return (
-    <div className="bx" style={{ ...shell, ...arenaStyle(t.bgUrl) }}
+    <div className="bx" style={{ color: C.ink, minHeight: "100vh", backgroundColor: C.base }}
       onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
       <Style />
+      <Backdrop url={t.bgUrl} />
 
       <header style={{
         position: "sticky", top: 0, zIndex: 20, background: C.base,
+        // Own compositor layer: the bar is then moved by the compositor rather
+        // than repainted with the page, which is what stops it drifting.
+        transform: "translateZ(0)", willChange: "transform",
         borderBottom: `1px solid ${C.line}`, padding: "13px 16px",
         display: "flex", alignItems: "center", gap: 12,
       }}>
@@ -891,7 +920,10 @@ export default function App() {
         )}
       </header>
 
-      <main style={{ padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto" }}>
+      <main style={{
+        padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto",
+        position: "relative", zIndex: 1, // above the fixed backdrop
+      }}>
         {/* Keyed on the tab so the entrance animation restarts on every change. */}
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
           {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
@@ -909,6 +941,7 @@ export default function App() {
         background: C.surface, borderTop: `1px solid ${C.line}`,
         display: "grid", gridTemplateColumns: "repeat(5,1fr)",
         paddingBottom: "env(safe-area-inset-bottom)",
+        transform: "translateZ(0)", willChange: "transform",
       }}>
         {[
           ["groups", Users, "Groups"],
