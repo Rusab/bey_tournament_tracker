@@ -231,11 +231,19 @@ function scoreOf(m) {
   return { s1, s2 };
 }
 
+/**
+ * Nothing is won until the match is finished — including a walkover, which
+ * propagate() marks done up front.
+ *
+ * An empty slot is only a bye in the opening round. Later on it means the match
+ * feeding that slot has not been played yet, and treating it as a walkover
+ * marched a blader through the semi-final and crowned a champion while the
+ * quarter-finals were still being scored.
+ */
 function winnerOf(m) {
-  if (!m) return null;
+  if (!m || !m.done) return null;
   if (m.p1 && !m.p2) return m.p1;
   if (m.p2 && !m.p1) return m.p2;
-  if (!m.done) return null;
   const { s1, s2 } = scoreOf(m);
   if (s1 === s2) return null;
   return s1 > s2 ? m.p1 : m.p2;
@@ -419,6 +427,14 @@ function buildBracket(qualifiers, size, thirdPlace) {
 
 function propagate(bracket) {
   const rounds = bracket.rounds.map((r) => r.map((m) => ({ ...m })));
+
+  // Settle the genuine byes first. An unopposed blader in the opening round is
+  // through without playing, and this has to happen before the loop below or
+  // winnerOf — which now insists on a finished match — would not advance them.
+  rounds[0].forEach((m) => {
+    if ((m.p1 && !m.p2) || (m.p2 && !m.p1)) m.done = true;
+  });
+
   for (let r = 0; r < rounds.length - 1; r++) {
     rounds[r].forEach((m, i) => {
       const w = winnerOf(m);
@@ -427,9 +443,6 @@ function propagate(bracket) {
       if (tgt[slot] !== w) { tgt[slot] = w; tgt.events = []; tgt.done = false; }
     });
   }
-  rounds[0].forEach((m) => {
-    if ((m.p1 && !m.p2) || (m.p2 && !m.p1)) m.done = true;
-  });
 
   let third = bracket.third;
   if (third && rounds.length >= 2) {
@@ -1312,7 +1325,9 @@ function Setup({ onCreate }) {
 
 function GroupsView({ t, update, nameOf, isAdmin }) {
   const [moving, setMoving] = useState(null);
-  const [ask, setAsk] = useState(null); // null | "redraw" | "blocked"
+  const [ask, setAsk] = useState(null);         // null | "redraw" | "blocked"
+  const [pending, setPending] = useState(null); // a move/remove awaiting confirmation
+  const [entry, setEntry] = useState("");
   const assigned = new Set(t.groups.flatMap((g) => g.playerIds));
   const unassigned = t.players.filter((p) => !assigned.has(p.id));
 
@@ -1343,14 +1358,65 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
     else draw();
   };
 
+  /* ---- roster changes ---- */
+
+  const groupOf = (pid) => t.groups.find((g) => g.playerIds.includes(pid));
+
+  /** Results this blader already has. Moving or removing them discards these. */
+  const playedBy = (pid) =>
+    t.groupMatches.filter((m) => (m.p1 === pid || m.p2 === pid) && (m.events || []).length > 0).length;
+
+  const bracketMatches = (b) =>
+    b ? [...b.rounds.flat(), ...(b.third ? [b.third] : [])] : [];
+
+  const inBracket = (pid) =>
+    bracketMatches(t.bracket).some((m) => m.p1 === pid || m.p2 === pid);
+
+  const addPlayer = () => {
+    const name = entry.trim();
+    if (!name) return;
+    // Placed outside the groups, so putting them somewhere stays a decision.
+    update((d) => { d.players.push({ id: uid(), name }); return d; });
+    setEntry("");
+  };
+
   const moveTo = (playerId, gid) => {
     update((d) => {
       d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
       if (gid) d.groups.find((g) => g.id === gid).playerIds.push(playerId);
+      // Fixtures against their old group cease to exist, and with them any
+      // results those fixtures held.
       d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
       return d;
     });
-    setMoving(null);
+    setMoving(null); setPending(null);
+  };
+
+  const removePlayer = (playerId) => {
+    update((d) => {
+      d.players = d.players.filter((p) => p.id !== playerId);
+      d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
+      d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
+      // A bracket holding a blader who no longer exists is a fiction.
+      if (bracketMatches(d.bracket).some((m) => m.p1 === playerId || m.p2 === playerId)) {
+        d.bracket = null;
+      }
+      return d;
+    });
+    setMoving(null); setPending(null);
+  };
+
+  // Same group in, same group out costs nothing, so it skips the warning.
+  const askMove = (playerId, gid) => {
+    const from = groupOf(playerId);
+    if (gid && from && from.id === gid) { setMoving(null); return; }
+    if (playedBy(playerId) > 0) setPending({ kind: "move", pid: playerId, gid });
+    else moveTo(playerId, gid);
+  };
+
+  const askRemove = (playerId) => {
+    if (playedBy(playerId) > 0 || inBracket(playerId)) setPending({ kind: "remove", pid: playerId });
+    else removePlayer(playerId);
   };
 
   return (
@@ -1380,6 +1446,45 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
         />
       )}
 
+      {pending && (
+        <Confirm
+          title={pending.kind === "remove" ? "Remove this blader?" : "Move them now?"}
+          tone="danger" confirmLabel={pending.kind === "remove" ? "Remove" : "Move anyway"}
+          body={(() => {
+            const n = playedBy(pending.pid);
+            const who = nameOf(pending.pid);
+            const played = `${n} match${n > 1 ? "es" : ""} ${who} ${n > 1 ? "have" : "has"} already played`;
+            if (pending.kind === "remove") {
+              return `${who} leaves the tournament, and ${played} ${n > 1 ? "go" : "goes"} with them.`
+                + (inBracket(pending.pid)
+                  ? " They are in the knockout bracket, so the bracket is removed too — rebuild it from the Table tab."
+                  : "");
+            }
+            const to = pending.gid ? (t.groups.find((g) => g.id === pending.gid) || {}).name : "no group";
+            return `Moving ${who} to ${to} rebuilds their fixtures, so ${played} ${n > 1 ? "are" : "is"} discarded.`;
+          })()}
+          onConfirm={() => (pending.kind === "remove"
+            ? removePlayer(pending.pid)
+            : moveTo(pending.pid, pending.gid))}
+          onClose={() => setPending(null)}
+        />
+      )}
+
+      {isAdmin && (
+        <div style={{ ...card, marginBottom: 14 }}>
+          <div className="bx-d" style={{ fontSize: 16, fontWeight: 700, marginBottom: 9 }}>Add a blader</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={inputStyle} value={entry} onChange={(e) => setEntry(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="Name" />
+            <Btn onClick={addPlayer} tone="primary" style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
+          </div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 8, lineHeight: 1.45, maxWidth: "56ch" }}>
+            They arrive outside the groups. Tap them below to place them — everyone
+            already in that group picks up a new fixture against them.
+          </div>
+        </div>
+      )}
+
       {unassigned.length > 0 && (
         <div style={{ ...card, borderColor: `${C.gold}77`, marginBottom: 14 }}>
           <div className="bx-d" style={{ fontSize: 16, color: C.gold, fontWeight: 700, marginBottom: 9 }}>
@@ -1398,10 +1503,16 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
           position: "sticky", top: 70, zIndex: 15, background: C.raised,
           border: `1px solid ${C.magenta}`, borderRadius: 4, padding: 12, marginBottom: 14,
         }}>
-          <div style={{ fontSize: 13.5, marginBottom: 9 }}>Move <strong>{nameOf(moving)}</strong> to</div>
+          <div style={{ fontSize: 13.5, marginBottom: 9 }}>
+            Move <strong>{nameOf(moving)}</strong> to
+            {playedBy(moving) > 0 && (
+              <span style={{ color: C.gold }}> — {playedBy(moving)} played match{playedBy(moving) > 1 ? "es" : ""} at stake</span>
+            )}
+          </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {t.groups.map((g) => <Btn key={g.id} onClick={() => moveTo(moving, g.id)}>{g.name}</Btn>)}
-            <Btn onClick={() => moveTo(moving, null)} tone="ghost">Unassign</Btn>
+            {t.groups.map((g) => <Btn key={g.id} onClick={() => askMove(moving, g.id)}>{g.name}</Btn>)}
+            <Btn onClick={() => askMove(moving, null)} tone="ghost">Unassign</Btn>
+            <Btn onClick={() => askRemove(moving)} tone="danger"><Trash2 size={14} />Remove</Btn>
             <Btn onClick={() => setMoving(null)} tone="ghost">Cancel</Btn>
           </div>
         </div>
@@ -1481,7 +1592,8 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
   );
 }
 
-function MatchRow({ m, nameOf, onClick, label, locked }) {
+/** byePossible: only the opening round, where an empty slot really is a bye. */
+function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
   const { s1, s2 } = scoreOf(m);
   const w = winnerOf(m);
   const both = m.p1 && m.p2 && !locked;
@@ -1508,7 +1620,7 @@ function MatchRow({ m, nameOf, onClick, label, locked }) {
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
         whiteSpace: "nowrap", textAlign: "right", fontWeight: w === m.p2 ? 700 : 400,
         color: m.p2 ? (w === m.p2 ? C.cyan : C.ink) : C.muted,
-      }}>{m.p2 ? nameOf(m.p2) : (m.p1 ? "Bye" : "TBD")}</span>
+      }}>{m.p2 ? nameOf(m.p2) : (m.p1 && byePossible ? "Bye" : "TBD")}</span>
     </button>
   );
 }
@@ -1697,7 +1809,8 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
               </span>
             </div>
             {r.map((m, i) => (
-              <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} onClick={() => onScore(m.id)} label={`M${i + 1}`} />
+              <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} byePossible={ri === 0}
+                onClick={() => onScore(m.id)} label={`M${i + 1}`} />
             ))}
           </div>
         );
