@@ -1878,6 +1878,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const [events, setEvents] = useState(match.events || []);
   const [askReset, setAskReset] = useState(false);
   const [askLeave, setAskLeave] = useState(false);
+  const [askUndo, setAskUndo] = useState(false);
   const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
   const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
   const over = s1 >= target || s2 >= target;
@@ -1888,6 +1889,16 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const dirty = JSON.stringify(events) !== JSON.stringify(match.events || []);
   const tryClose = () => (dirty ? setAskLeave(true) : onClose());
   const swipeBack = useSwipeBack(tryClose);
+
+  const undo = () => setEvents((v) => v.slice(0, -1));
+
+  /*
+   * Undo is a rapid correction while scoring, so it stays instant — asking
+   * after every mis-tap would make it useless. The exception is the first
+   * touch to a result that is already saved: that is editing history, not
+   * correcting a typo. Once that edit is confirmed, undo goes quiet again.
+   */
+  const tryUndo = () => (match.done && !dirty ? setAskUndo(true) : undo());
 
   const add = (side, f) => {
     if (over) return;
@@ -1960,10 +1971,20 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
         <Btn onClick={() => (events.length ? setAskReset(true) : null)} tone="ghost"
           disabled={!events.length} style={{ padding: "7px 11px" }}>Reset</Btn>
         <span className="bx-undo-head">
-          <Btn onClick={() => setEvents((v) => v.slice(0, -1))} tone="ghost" disabled={!events.length}
+          <Btn onClick={tryUndo} tone="ghost" disabled={!events.length}
             style={{ padding: "7px 11px" }} aria-label="Undo last finish"><Undo2 size={15} /></Btn>
         </span>
       </div>
+
+      {askUndo && (
+        <Confirm
+          title="Change a saved result?"
+          body={`This match is saved as ${scoreOf(match).s1}–${scoreOf(match).s2}. Undoing takes the last point back off it — nothing changes for anyone else until you save again.`}
+          confirmLabel="Undo" tone="danger"
+          onConfirm={() => { undo(); setAskUndo(false); }}
+          onClose={() => setAskUndo(false)}
+        />
+      )}
 
       {askLeave && (
         <Confirm
@@ -1988,7 +2009,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
       {events.length > 0 && (
         <button
-          onClick={() => setEvents((v) => v.slice(0, -1))}
+          onClick={tryUndo}
           className="bx-d bx-undo-fab" aria-label="Undo last finish"
           style={{
             position: "fixed", left: "50%", transform: "translateX(-50%)",
