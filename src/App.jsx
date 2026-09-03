@@ -696,6 +696,40 @@ function inOverlay(el, root) {
   return false;
 }
 
+/**
+ * Swipe rightwards to go back, the direction every platform uses for it.
+ * Returns handlers to spread onto a full-screen sheet.
+ *
+ * Same thresholds as the tab swipe, so a scroll or a stray drag is not read as
+ * a dismissal, and touches inside a dialog or a sideways-scrolling table belong
+ * to those instead.
+ */
+function useSwipeBack(onBack) {
+  const start = useRef(null);
+  return {
+    onTouchStart: (e) => {
+      const p = e.touches.length === 1 ? e.touches[0] : null;
+      start.current =
+        p && p.clientX > SWIPE_EDGE
+          && !inOverlay(e.target, e.currentTarget)
+          && !inHorizontalScroller(e.target)
+          ? { x: p.clientX, y: p.clientY, at: Date.now() }
+          : null;
+    },
+    onTouchEnd: (e) => {
+      const s = start.current;
+      start.current = null;
+      if (!s || e.changedTouches.length !== 1) return;
+      const dx = e.changedTouches[0].clientX - s.x;
+      const dy = e.changedTouches[0].clientY - s.y;
+      if (Date.now() - s.at > SWIPE_MAX_MS) return;
+      if (dx < SWIPE_MIN_X) return; // rightwards only — leftwards means nothing here
+      if (Math.abs(dx) < Math.abs(dy) * SWIPE_X_OVER_Y) return;
+      onBack();
+    },
+  };
+}
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -1843,6 +1877,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
   const [events, setEvents] = useState(match.events || []);
   const [askReset, setAskReset] = useState(false);
+  const swipeBack = useSwipeBack(onClose);
   const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
   const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
   const over = s1 >= target || s2 >= target;
@@ -1900,7 +1935,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   };
 
   return (
-    <div className="bx" style={{
+    <div className="bx" {...swipeBack} style={{
       position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
     }}>
       <div style={{
@@ -2080,6 +2115,8 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
   const gi = t.groups.findIndex((g) => g.playerIds.includes(playerId));
   const col = gi >= 0 ? GROUP_COLORS[gi % GROUP_COLORS.length] : C.magenta;
 
+  const swipeBack = useSwipeBack(onClose);
+
   const Stat = ({ label, value, color }) => (
     <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3, padding: "11px 12px" }}>
       <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 3 }}>{label}</div>
@@ -2088,7 +2125,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
   );
 
   return (
-    <div className="bx" style={{
+    <div className="bx" {...swipeBack} style={{
       position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
     }}>
       <div style={{
