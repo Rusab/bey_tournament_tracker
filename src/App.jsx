@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon,
+  Image as ImageIcon, Download, Crown,
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -341,6 +341,194 @@ function computeStandings(playerIds, matches, nameOf) {
       nameOf(x.id).localeCompare(nameOf(y.id))
   );
 }
+
+/* ---- end of tournament ---- */
+
+/**
+ * The best record of the group stage, across every group rather than within
+ * one. Most wins takes it; margin separates a tie; anyone still level is a
+ * king alongside the others rather than being split by something arbitrary.
+ */
+function swissKings(t) {
+  const rec = {};
+  t.players.forEach((p) => { rec[p.id] = { id: p.id, name: p.name, wins: 0, margin: 0, played: 0 }; });
+
+  t.groupMatches.forEach((m) => {
+    if (!m.done || !m.p1 || !m.p2) return;
+    const a = rec[m.p1], b = rec[m.p2];
+    if (!a || !b) return;
+    const { s1, s2 } = scoreOf(m);
+    a.played++; b.played++;
+    if (s1 > s2) { a.wins++; a.margin += s1 - s2; }
+    else if (s2 > s1) { b.wins++; b.margin += s2 - s1; }
+  });
+
+  const played = Object.values(rec).filter((r) => r.played > 0);
+  if (!played.length) return [];
+  const topWins = Math.max(...played.map((r) => r.wins));
+  const onWins = played.filter((r) => r.wins === topWins);
+  const topMargin = Math.max(...onWins.map((r) => r.margin));
+  return onWins.filter((r) => r.margin === topMargin);
+}
+
+const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+/** Every stage starts at zero: a bonus nobody sets should change nothing. */
+const defaultScoring = () => ({
+  perWin: "3",
+  perMargin: "1",
+  stages: Object.fromEntries(
+    ["group", "r16", "qf", "sf", "final", "third"].map((k) => [k, { play: "0", win: "0" }])
+  ),
+});
+
+/**
+ * Ranks every blader by a scoring scheme the organiser chooses, which need not
+ * agree with who lifted the trophy.
+ *
+ * A match pays its stage's bonus for playing, and to the winner: the points
+ * for a win, the stage's bonus for winning, and their margin times its weight.
+ * Byes are skipped — nobody played, so nobody is paid.
+ */
+function finalStandings(t, cfg) {
+  const all = [
+    ...t.groupMatches,
+    ...(t.bracket ? t.bracket.rounds.flat() : []),
+    ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
+  ];
+
+  const rec = {};
+  t.players.forEach((p) => {
+    rec[p.id] = {
+      id: p.id, name: p.name, total: 0, played: 0, wins: 0, losses: 0,
+      margin: 0, pf: 0, pa: 0, bonus: 0,
+    };
+  });
+
+  all.forEach((m) => {
+    if (!m.done || !m.p1 || !m.p2) return;
+    const a = rec[m.p1], b = rec[m.p2];
+    if (!a || !b) return;
+    const st = cfg.stages[stageOf(m, t)] || { play: 0, win: 0 };
+    const { s1, s2 } = scoreOf(m);
+
+    [[a, s1, s2], [b, s2, s1]].forEach(([r, mine, theirs]) => {
+      r.played++; r.pf += mine; r.pa += theirs;
+      r.total += num(st.play);
+      r.bonus += num(st.play);
+      if (mine > theirs) {
+        r.wins++;
+        r.margin += mine - theirs;
+        r.total += num(cfg.perWin) + num(st.win) + (mine - theirs) * num(cfg.perMargin);
+        r.bonus += num(st.win);
+      } else if (theirs > mine) {
+        r.losses++;
+      }
+    });
+  });
+
+  const rows = Object.values(rec)
+    .filter((r) => r.played > 0)
+    .sort((x, y) =>
+      y.total - x.total || y.wins - x.wins || y.margin - x.margin || x.name.localeCompare(y.name));
+
+  // Equal totals share a rank, and the next one skips accordingly.
+  let rank = 0, prev = null;
+  rows.forEach((r, i) => {
+    if (prev === null || r.total !== prev) rank = i + 1;
+    r.rank = rank;
+    prev = r.total;
+  });
+  return rows;
+}
+
+/* ---- CSV export ---- */
+
+const csvCell = (v) => {
+  const s = v === null || v === undefined ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const csvRow = (cells) => cells.map(csvCell).join(",");
+
+/**
+ * The whole tournament as one file: the ranking, how it was arrived at, and
+ * every match point by point, so the record survives the app.
+ */
+function buildFinalCSV(t, cfg, rows, kings) {
+  const nameOf = (id) => (t.players.find((p) => p.id === id) || {}).name || "—";
+  const groupName = (id) => (t.groups.find((g) => g.id === id) || {}).name || "";
+  const stageLabel = (key) =>
+    (stagesFor(t.koSize, t.thirdPlace).find((s) => s.key === key) || {}).label || key;
+
+  const out = [];
+  out.push(csvRow([t.name, "final standings"]));
+  out.push(csvRow(["Generated", new Date().toISOString()]));
+  out.push("");
+
+  out.push(csvRow(["FINAL RANKING"]));
+  out.push(csvRow(["Rank", "Blader", "Total", "Played", "Won", "Lost", "Winning margin",
+    "Points for", "Points against", "Of which bonuses"]));
+  rows.forEach((r) => out.push(csvRow([r.rank, r.name, r.total, r.played, r.wins, r.losses,
+    r.margin, r.pf, r.pa, r.bonus])));
+  out.push("");
+
+  out.push(csvRow([kings.length > 1 ? "SWISS KINGS" : "SWISS KING"]));
+  out.push(csvRow(["Blader", "Group-stage wins", "Winning margin"]));
+  kings.forEach((k) => out.push(csvRow([k.name, k.wins, k.margin])));
+  out.push("");
+
+  out.push(csvRow(["SCORING USED"]));
+  out.push(csvRow(["Points for each win", cfg.perWin]));
+  out.push(csvRow(["Points per point of winning margin", cfg.perMargin]));
+  out.push(csvRow(["Stage", "Bonus for playing", "Bonus for winning"]));
+  stagesFor(t.koSize, t.thirdPlace).forEach((s) => {
+    const st = cfg.stages[s.key] || {};
+    out.push(csvRow([s.label, st.play, st.win]));
+  });
+  out.push("");
+
+  out.push(csvRow(["MATCHES"]));
+  out.push(csvRow(["Stage", "Group", "Blader A", "Blader B", "Score A", "Score B",
+    "Winner", "Points in order"]));
+
+  const all = [
+    ...t.groupMatches,
+    ...(t.bracket ? t.bracket.rounds.flat() : []),
+    ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
+  ];
+  all.forEach((m) => {
+    if (!m.p1 && !m.p2) return;
+    const { s1, s2 } = scoreOf(m);
+    const w = winnerOf(m);
+    const seq = (m.events || [])
+      .map((e, i) => `${i + 1}. ${nameOf(e.side === 1 ? m.p1 : m.p2)} ${(awardOf(e.type) || { label: e.type }).label} +${e.pts}`)
+      .join("; ");
+    out.push(csvRow([
+      stageLabel(stageOf(m, t)), groupName(m.groupId),
+      m.p1 ? nameOf(m.p1) : "", m.p2 ? nameOf(m.p2) : "",
+      m.done ? s1 : "", m.done ? s2 : "",
+      w ? nameOf(w) : (m.done ? "draw" : "not played"),
+      seq,
+    ]));
+  });
+
+  return out.join("\n");
+}
+
+function downloadCSV(filename, text) {
+  // The BOM is what stops Excel mangling names with accents in them.
+  const blob = new Blob([`﻿${text}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+const slug = (s) => (s || "tournament").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 /* ---- bracket ---- */
 
@@ -751,6 +939,7 @@ export default function App() {
   const [scoring, setScoring] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
+  const [showFinal, setShowFinal] = useState(false);
   const [role, setRole] = useState("spectator");
   const [showGate, setShowGate] = useState(false);
   const [live, setLive] = useState(false);
@@ -1026,7 +1215,7 @@ export default function App() {
             group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
           {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin}
-            group={group} setGroup={setGroup} onPlayer={setDetail} />}
+            group={group} setGroup={setGroup} onPlayer={setDetail} onFinal={() => setShowFinal(true)} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
             onScore={(id) => setScoring({ kind: "ko", id })} />}
           {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
@@ -1079,6 +1268,9 @@ export default function App() {
       {showSetup && isAdmin && (
         <SettingsSheet t={t} update={update} onClose={() => setShowSetup(false)}
           onReset={() => { setT(null); setShowSetup(false); }} />
+      )}
+      {showFinal && isAdmin && (
+        <FinalStandingsSheet t={t} onClose={() => setShowFinal(false)} />
       )}
       {showGate && (
         <AdminGate onClose={() => setShowGate(false)} onPass={() => setShowGate(false)} />
@@ -1663,7 +1855,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
 /*  Standings                                                          */
 /* ================================================================== */
 
-function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup }) {
+function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFinal }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
   const [ask, setAsk] = useState(false);
 
@@ -1682,6 +1874,14 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup }) {
         .filter((m) => (m.events || []).length > 0).length
     : 0;
 
+  const kings = allPlayed ? swissKings(t) : [];
+
+  // The trophy is lifted, or there was never a knockout to lift one in.
+  const champion = t.bracket
+    ? winnerOf(t.bracket.rounds[t.bracket.rounds.length - 1][0])
+    : null;
+  const finished = t.koSize > 0 ? !!champion : allPlayed;
+
   if (!t.groupMatches.length) {
     return <EmptyState title="No standings yet" body="Draw the groups and the tables appear here." />;
   }
@@ -1690,6 +1890,29 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup }) {
     <div>
       <SectionHead title="Standings" color={C.cyan}
         sub="Ranked by wins, then by total margin across won matches only. Tap a name for that blader's record." />
+
+      {kings.length > 0 && (
+        <div style={{
+          border: `1px solid ${C.cyan}`, borderRadius: 4, marginBottom: 16,
+          background: `linear-gradient(100deg, ${C.cyan}1E, ${C.magenta}10)`,
+          padding: "14px 16px", display: "flex", alignItems: "center", gap: 13,
+        }}>
+          <Crown size={26} color={C.cyan} style={{ flexShrink: 0 }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: C.cyan }}>
+              {kings.length > 1 ? "Swiss Kings" : "Swiss King"}
+            </div>
+            <div className="bx-d" style={{ fontSize: 23, fontWeight: 800, lineHeight: 1.1 }}>
+              {kings.map((k) => k.name).join(" & ")}
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+              Best of the group stage — {kings[0].wins} win{kings[0].wins === 1 ? "" : "s"}, margin {kings[0].margin}
+              {kings.length > 1 && ", shared"}
+            </div>
+          </div>
+        </div>
+      )}
+
       <GroupPicker t={t} value={group} onChange={setGroup} />
 
       {t.groups.map((g, gi) => {
@@ -1757,6 +1980,20 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup }) {
             tone={allPlayed ? "primary" : "default"}>
             <GitBranch size={15} />{t.bracket ? "Rebuild bracket" : "Build bracket"}
           </Btn>
+        </div>
+      )}
+
+      {finished && isAdmin && (
+        <div style={{ ...card, borderColor: `${C.gold}88`, marginTop: 14 }}>
+          <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>
+            Generate final standings
+          </div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "58ch" }}>
+            Rank every blader on your own scoring — points per win and per margin, plus
+            what each stage pays for playing and for winning. The champion need not come
+            out on top. Downloads a CSV of the whole tournament with it.
+          </div>
+          <Btn onClick={onFinal} tone="primary"><Medal size={15} />Generate final standings</Btn>
         </div>
       )}
 
@@ -2272,6 +2509,168 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
 /* ================================================================== */
 /*  Settings                                                           */
 /* ================================================================== */
+
+const SCORING_KEY = "bx:scoring";
+
+function loadScoring() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SCORING_KEY));
+    if (saved && saved.stages) return { ...defaultScoring(), ...saved };
+  } catch (e) { /* nothing usable stored */ }
+  return defaultScoring();
+}
+
+/**
+ * Final standings on the organiser's own terms. The ranking recalculates as
+ * the weights are typed, so a scheme can be felt out rather than guessed at,
+ * and the CSV carries the whole tournament out with it.
+ */
+function FinalStandingsSheet({ t, onClose }) {
+  const [cfg, setCfg] = useState(loadScoring);
+  const swipeBack = useSwipeBack(onClose);
+
+  useEffect(() => {
+    try { localStorage.setItem(SCORING_KEY, JSON.stringify(cfg)); } catch (e) { /* private mode */ }
+  }, [cfg]);
+
+  const stages = stagesFor(t.koSize, t.thirdPlace);
+  const kings = useMemo(() => swissKings(t), [t]);
+  const rows = useMemo(() => finalStandings(t, cfg), [t, cfg]);
+
+  const setStage = (key, field, v) =>
+    setCfg((c) => ({ ...c, stages: { ...c.stages, [key]: { ...c.stages[key], [field]: v } } }));
+
+  const Num = ({ label, value, onChange }) => (
+    <label style={{ display: "block", flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 5 }}>{label}</div>
+      <input type="number" inputMode="decimal" value={value} step="any"
+        onChange={(e) => onChange(e.target.value)}
+        style={{ ...inputStyle, padding: "9px 10px", fontSize: 15 }} />
+    </label>
+  );
+
+  return (
+    <div className="bx" {...swipeBack} style={{
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(t.bgUrl), overflowY: "auto",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
+      }}>
+        <button onClick={onClose} aria-label="Back"
+          style={{ background: "none", border: "none", color: C.ink, cursor: "pointer", display: "flex", padding: 4 }}>
+          <ArrowLeft size={20} />
+        </button>
+        <div className="bx-d" style={{ fontSize: 22, fontWeight: 800 }}>Final standings</div>
+      </div>
+
+      <div style={{ padding: 16, maxWidth: 720, margin: "0 auto" }}>
+        {kings.length > 0 && (
+          <div style={{
+            border: `1px solid ${C.cyan}`, borderRadius: 4, marginBottom: 20,
+            background: `linear-gradient(100deg, ${C.cyan}1E, ${C.magenta}10)`, padding: "16px",
+          }}>
+            <div style={{ fontSize: 12.5, color: C.cyan, marginBottom: 4 }}>
+              {kings.length > 1 ? "Swiss Kings" : "Swiss King"}
+            </div>
+            <div className="bx-d" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.1 }}>
+              {kings.map((k) => k.name).join(" & ")}
+            </div>
+            <div style={{ fontSize: 12.5, color: C.muted, marginTop: 5 }}>
+              {kings[0].wins} group win{kings[0].wins === 1 ? "" : "s"}, margin {kings[0].margin}
+              {kings.length > 1 && " — level on both, so the title is shared"}
+            </div>
+          </div>
+        )}
+
+        <Field label="Every win is worth"
+          hint="Margin counts only for the blader who won, the same margin shown in Standings. Both are added to whatever the stage below pays.">
+          <div style={{ display: "flex", gap: 10 }}>
+            <Num label="Points per win" value={cfg.perWin}
+              onChange={(v) => setCfg((c) => ({ ...c, perWin: v }))} />
+            <Num label="Points per margin point" value={cfg.perMargin}
+              onChange={(v) => setCfg((c) => ({ ...c, perMargin: v }))} />
+          </div>
+        </Field>
+
+        <Field label="Stage bonuses"
+          hint="Left column is paid for turning up to that stage, right for winning there. Leave a stage at 0 to pay nothing for it.">
+          <div style={{ display: "grid", gap: 8 }}>
+            {stages.map((s, i) => (
+              <div key={s.key} style={{
+                background: C.base, border: `1px solid ${C.line}`, borderRadius: 3, padding: "10px 12px",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                  <Blade color={GROUP_COLORS[i % GROUP_COLORS.length]} h={14} />
+                  <span className="bx-d" style={{ fontSize: 15.5, fontWeight: 700 }}>{s.label}</span>
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <Num label="For playing" value={cfg.stages[s.key].play}
+                    onChange={(v) => setStage(s.key, "play", v)} />
+                  <Num label="For winning" value={cfg.stages[s.key].win}
+                    onChange={(v) => setStage(s.key, "win", v)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Field>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "26px 0 10px" }}>
+          <Blade color={C.gold} h={18} />
+          <h3 className="bx-d" style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>The ranking</h3>
+          <Btn onClick={() => setCfg(defaultScoring())} tone="ghost"
+            style={{ marginLeft: "auto", padding: "6px 10px", fontSize: 13 }}>Reset weights</Btn>
+        </div>
+
+        <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: 18 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ color: C.muted, fontSize: 12 }}>
+                  {["", "Blader", "Total", "P", "W", "Margin"].map((h, i) => (
+                    <th key={i} style={{
+                      textAlign: i === 1 ? "left" : i === 0 ? "center" : "right",
+                      padding: "8px 10px", fontWeight: 600,
+                      borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap",
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id}>
+                    <td style={{ ...td, textAlign: "center", width: 28, fontWeight: 800, color: r.rank <= 3 ? C.gold : C.muted }}>{r.rank}</td>
+                    <td style={{ ...td, textAlign: "left", whiteSpace: "nowrap", fontWeight: r.rank <= 3 ? 600 : 400 }}>{r.name}</td>
+                    <td style={{ ...td, color: C.cyan, fontWeight: 800 }}>{Math.round(r.total * 100) / 100}</td>
+                    <td style={td}>{r.played}</td>
+                    <td style={td}>{r.wins}</td>
+                    <td style={{ ...td, color: C.muted }}>{r.margin}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {rows.length === 0 && (
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 18 }}>
+            No completed matches to rank yet.
+          </div>
+        )}
+
+        <Btn tone="primary" disabled={rows.length === 0}
+          onClick={() => downloadCSV(`${slug(t.name)}-final-standings.csv`, buildFinalCSV(t, cfg, rows, kings))}
+          style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 17 }}>
+          <Download size={18} />Download the CSV
+        </Btn>
+        <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, lineHeight: 1.5, maxWidth: "58ch" }}>
+          The file holds this ranking, the weights behind it, the Swiss King, and every
+          match point by point — so nothing is lost when the tournament is cleared.
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function SettingsSheet({ t, update, onClose, onReset }) {
   const [confirm, setConfirm] = useState(false);
