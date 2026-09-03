@@ -1877,10 +1877,17 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
   const [events, setEvents] = useState(match.events || []);
   const [askReset, setAskReset] = useState(false);
-  const swipeBack = useSwipeBack(onClose);
+  const [askLeave, setAskLeave] = useState(false);
   const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
   const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
   const over = s1 >= target || s2 >= target;
+
+  // Nothing here is written until Save, so every way out of this sheet throws
+  // away whatever has been tapped in. Ask first — the swipe especially is easy
+  // to trigger by accident, and Cancel sits right beside Save.
+  const dirty = JSON.stringify(events) !== JSON.stringify(match.events || []);
+  const tryClose = () => (dirty ? setAskLeave(true) : onClose());
+  const swipeBack = useSwipeBack(tryClose);
 
   const add = (side, f) => {
     if (over) return;
@@ -1942,7 +1949,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
-        <button onClick={onClose} aria-label="Back"
+        <button onClick={tryClose} aria-label="Back"
           style={{ background: "none", border: "none", color: C.ink, cursor: "pointer", display: "flex", padding: 4 }}>
           <ArrowLeft size={20} />
         </button>
@@ -1957,6 +1964,17 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
             style={{ padding: "7px 11px" }} aria-label="Undo last finish"><Undo2 size={15} /></Btn>
         </span>
       </div>
+
+      {askLeave && (
+        <Confirm
+          title="Leave without saving?"
+          body={match.done
+            ? `This match goes back to the saved ${scoreOf(match).s1}–${scoreOf(match).s2}. What you have tapped in here is discarded.`
+            : `Nothing is saved for this match yet, so the ${s1}–${s2} on screen is discarded.`}
+          confirmLabel="Discard" tone="danger"
+          onConfirm={onClose} onClose={() => setAskLeave(false)}
+        />
+      )}
 
       {askReset && (
         <Confirm
@@ -2030,7 +2048,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
         )}
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
-          <Btn onClick={onClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 14 }}>Cancel</Btn>
+          <Btn onClick={tryClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 14 }}>Cancel</Btn>
           <Btn onClick={() => onSave(events, over)} tone="primary" disabled={!over}
             style={{ flex: 2, justifyContent: "center", padding: 14, fontSize: 17 }}>Save result</Btn>
         </div>
