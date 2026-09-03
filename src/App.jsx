@@ -2525,6 +2525,39 @@ function loadScoring() {
  * the weights are typed, so a scheme can be felt out rather than guessed at,
  * and the CSV carries the whole tournament out with it.
  */
+/*
+ * Defined out here on purpose. Declared inside the sheet, this is a new
+ * component type on every render, so React tears the input down and builds it
+ * again on each keystroke — the field loses focus and a phone's keypad shuts
+ * every time a digit is typed.
+ *
+ * A div rather than a label, too: these sit inside a labelled block, and a
+ * label within a label sends a tap to the wrong field.
+ */
+function NumField({ label, aria, value, onChange }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 5 }}>{label}</div>
+      <input
+        type="number" inputMode="decimal" step="any" value={value} aria-label={aria || label}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ ...inputStyle, padding: "9px 10px", fontSize: 15 }}
+      />
+    </div>
+  );
+}
+
+/** A labelled block that is not a <label>, so it can hold several inputs. */
+function Block({ title, hint, children }) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div className="bx-d" style={{ fontSize: 15, color: C.ink, marginBottom: 7, fontWeight: 600 }}>{title}</div>
+      {children}
+      {hint && <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6, lineHeight: 1.45, maxWidth: "58ch" }}>{hint}</div>}
+    </div>
+  );
+}
+
 function FinalStandingsSheet({ t, onClose }) {
   const [cfg, setCfg] = useState(loadScoring);
   const swipeBack = useSwipeBack(onClose);
@@ -2539,15 +2572,6 @@ function FinalStandingsSheet({ t, onClose }) {
 
   const setStage = (key, field, v) =>
     setCfg((c) => ({ ...c, stages: { ...c.stages, [key]: { ...c.stages[key], [field]: v } } }));
-
-  const Num = ({ label, value, onChange }) => (
-    <label style={{ display: "block", flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 5 }}>{label}</div>
-      <input type="number" inputMode="decimal" value={value} step="any"
-        onChange={(e) => onChange(e.target.value)}
-        style={{ ...inputStyle, padding: "9px 10px", fontSize: 15 }} />
-    </label>
-  );
 
   return (
     <div className="bx" {...swipeBack} style={{
@@ -2564,36 +2588,20 @@ function FinalStandingsSheet({ t, onClose }) {
         <div className="bx-d" style={{ fontSize: 22, fontWeight: 800 }}>Final standings</div>
       </div>
 
+      {/* The Swiss King belongs on the Standings tab; here it is only carried
+          into the CSV. This page is for setting the weights. */}
       <div style={{ padding: 16, maxWidth: 720, margin: "0 auto" }}>
-        {kings.length > 0 && (
-          <div style={{
-            border: `1px solid ${C.cyan}`, borderRadius: 4, marginBottom: 20,
-            background: `linear-gradient(100deg, ${C.cyan}1E, ${C.magenta}10)`, padding: "16px",
-          }}>
-            <div style={{ fontSize: 12.5, color: C.cyan, marginBottom: 4 }}>
-              {kings.length > 1 ? "Swiss Kings" : "Swiss King"}
-            </div>
-            <div className="bx-d" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.1 }}>
-              {kings.map((k) => k.name).join(" & ")}
-            </div>
-            <div style={{ fontSize: 12.5, color: C.muted, marginTop: 5 }}>
-              {kings[0].wins} group win{kings[0].wins === 1 ? "" : "s"}, margin {kings[0].margin}
-              {kings.length > 1 && " — level on both, so the title is shared"}
-            </div>
-          </div>
-        )}
-
-        <Field label="Every win is worth"
+        <Block title="Every win is worth"
           hint="Margin counts only for the blader who won, the same margin shown in Standings. Both are added to whatever the stage below pays.">
           <div style={{ display: "flex", gap: 10 }}>
-            <Num label="Points per win" value={cfg.perWin}
+            <NumField label="Points per win" value={cfg.perWin}
               onChange={(v) => setCfg((c) => ({ ...c, perWin: v }))} />
-            <Num label="Points per margin point" value={cfg.perMargin}
+            <NumField label="Points per margin point" value={cfg.perMargin}
               onChange={(v) => setCfg((c) => ({ ...c, perMargin: v }))} />
           </div>
-        </Field>
+        </Block>
 
-        <Field label="Stage bonuses"
+        <Block title="Stage bonuses"
           hint="Left column is paid for turning up to that stage, right for winning there. Leave a stage at 0 to pay nothing for it.">
           <div style={{ display: "grid", gap: 8 }}>
             {stages.map((s, i) => (
@@ -2605,15 +2613,17 @@ function FinalStandingsSheet({ t, onClose }) {
                   <span className="bx-d" style={{ fontSize: 15.5, fontWeight: 700 }}>{s.label}</span>
                 </div>
                 <div style={{ display: "flex", gap: 10 }}>
-                  <Num label="For playing" value={cfg.stages[s.key].play}
+                  <NumField label="For playing" aria={`${s.label}, bonus for playing`}
+                    value={cfg.stages[s.key].play}
                     onChange={(v) => setStage(s.key, "play", v)} />
-                  <Num label="For winning" value={cfg.stages[s.key].win}
+                  <NumField label="For winning" aria={`${s.label}, bonus for winning`}
+                    value={cfg.stages[s.key].win}
                     onChange={(v) => setStage(s.key, "win", v)} />
                 </div>
               </div>
             ))}
           </div>
-        </Field>
+        </Block>
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "26px 0 10px" }}>
           <Blade color={C.gold} h={18} />
