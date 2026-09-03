@@ -2,6 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 
+// The bundle ran, so whatever the recovery in index.html was guarding against
+// is over. Clear the flag so it can act again if it ever recurs.
+try { sessionStorage.removeItem("bx:healed"); } catch (e) { /* private mode */ }
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <App />

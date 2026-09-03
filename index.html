@@ -20,6 +20,38 @@
   </head>
   <body style="margin:0; background:#0B0718">
     <div id="root"></div>
+
+    <!--
+      If the app bundle fails to load, the page is blank and a spectator has no
+      way to know a refresh would help. The usual cause is a stale cached page
+      asking for a bundle a deploy has replaced, so clear the worker and its
+      caches and reload — once, guarded, so a genuine outage cannot loop.
+    -->
+    <script>
+      window.addEventListener("error", function (event) {
+        var el = event.target;
+        if (!el || el.tagName !== "SCRIPT" || !el.src) return;
+        try {
+          if (sessionStorage.getItem("bx:healed")) return;
+          sessionStorage.setItem("bx:healed", "1");
+        } catch (e) { return; }
+
+        var done = function () { location.reload(); };
+        var workers = navigator.serviceWorker
+          ? navigator.serviceWorker.getRegistrations().then(function (rs) {
+              return Promise.all(rs.map(function (r) { return r.unregister(); }));
+            })
+          : Promise.resolve();
+
+        workers
+          .then(function () { return window.caches ? caches.keys() : []; })
+          .then(function (keys) {
+            return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+          })
+          .then(done, done);
+      }, true);
+    </script>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
