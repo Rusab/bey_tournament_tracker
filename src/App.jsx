@@ -36,6 +36,15 @@ const awardOf = (key) => AWARDS.find((a) => a.key === key);
 
 const GROUP_LETTERS = "ABCDEFGH".split("");
 
+/* A team is a competitor like any other; only the wording changes. */
+const isTag = (t) => t && t.format === "tag";
+const oneWord = (t) => (isTag(t) ? "team" : "blader");
+const manyWord = (t) => (isTag(t) ? "Teams" : "Bladers");
+const membersOf = (t, id) => {
+  const p = (t.players || []).find((x) => x.id === id);
+  return p && p.members && p.members.length ? p.members : null;
+};
+
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 /*
@@ -1190,7 +1199,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           ["matches", Swords, "Matches"],
           ["table", Table2, "Table"],
           ["bracket", GitBranch, "Bracket"],
-          ["players", Trophy, "Bladers"],
+          ["players", Trophy, manyWord(t)],
         ].map(([k, Icon, label]) => {
           const on = tab === k;
           return (
@@ -1334,6 +1343,7 @@ function StagePoints({ koSize, thirdPlace, points, onChange }) {
 
 function Setup({ onCreate }) {
   const [name, setName] = useState("");
+  const [format, setFormat] = useState("knockout");
   const [bulk, setBulk] = useState("");
   const [players, setPlayers] = useState([]);
   const [entry, setEntry] = useState("");
@@ -1345,16 +1355,32 @@ function Setup({ onCreate }) {
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
+  /*
+   * One line becomes one competitor. In a tag tournament "Ronin: Ayo, Bex"
+   * carries its members along, but it stays a single entrant everywhere else —
+   * the draw, the bracket and the scoring never learn the difference.
+   */
+  const parseEntry = (line) => {
+    const [head, tail] = String(line).split(/:(.+)/);
+    // A colon with nothing after it does not split, so it would otherwise stay
+    // stuck to the name and the team would be called "Ronin:".
+    const nm = (head || "").trim().replace(/:+$/, "").trim();
+    if (!nm) return null;
+    const members = (tail || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return members.length ? { id: uid(), name: nm, members } : { id: uid(), name: nm };
+  };
+
   const addPlayer = () => {
-    const n = entry.trim();
-    if (!n) return;
-    setPlayers((p) => [...p, { id: uid(), name: n }]);
+    const one = parseEntry(entry);
+    if (!one) return;
+    setPlayers((p) => [...p, one]);
     setEntry("");
   };
   const addBulk = () => {
-    const names = bulk.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-    if (!names.length) return;
-    setPlayers((p) => [...p, ...names.map((n) => ({ id: uid(), name: n }))]);
+    // Commas separate members, so a pasted list splits on line breaks alone.
+    const rows = bulk.split(/\n/).map(parseEntry).filter(Boolean);
+    if (!rows.length) return;
+    setPlayers((p) => [...p, ...rows]);
     setBulk("");
   };
 
@@ -1384,7 +1410,7 @@ function Setup({ onCreate }) {
       id: "g" + i, name: "Group " + GROUP_LETTERS[i], playerIds: [],
     }));
     onCreate({
-      name: name.trim(), players, groups, points, advance,
+      name: name.trim(), format, players, groups, points, advance,
       koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl, logoUrl,
     });
   };
@@ -1418,6 +1444,14 @@ function Setup({ onCreate }) {
             placeholder="Xtreme Clash S2" />
         </Field>
 
+        <Field label="Format"
+          hint="A tag team is one competitor with a name and members — it draws, plays and scores exactly as a single blader does.">
+          <Segmented value={format} onChange={setFormat} options={[
+            { value: "knockout", label: "Groups & knockout" },
+            { value: "tag", label: "Tag team" },
+          ]} />
+        </Field>
+
         <Field label="Organiser logo (optional)"
           hint="Shown beside the tournament name in the header. A PNG with a transparent background looks best — transparency is kept.">
           <ImagePicker kind="logo" value={logoUrl} onChange={setLogoUrl} />
@@ -1428,10 +1462,11 @@ function Setup({ onCreate }) {
           <ImagePicker kind="bg" value={bgUrl} onChange={setBgUrl} />
         </Field>
 
-        <Field label={`Bladers (${players.length})`}>
+        <Field label={`${format === "tag" ? "Teams" : "Bladers"} (${players.length})`}>
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} value={entry} onChange={(e) => setEntry(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="Add a name" />
+              onKeyDown={(e) => e.key === "Enter" && addPlayer()}
+              placeholder={format === "tag" ? "Ronin: Ayo, Bex" : "Add a name"} />
             <Btn onClick={addPlayer} tone="primary" style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
           </div>
           {players.length > 0 && (
@@ -1441,7 +1476,12 @@ function Setup({ onCreate }) {
                   display: "inline-flex", alignItems: "center", gap: 6, background: C.surface,
                   border: `1px solid ${C.line}`, borderRadius: 3, padding: "6px 9px", fontSize: 14,
                 }}>
-                  {p.name}
+                  <span>
+                    {p.name}
+                    {p.members && (
+                      <span style={{ color: C.muted, fontSize: 12 }}> · {p.members.join(", ")}</span>
+                    )}
+                  </span>
                   <button onClick={() => setPlayers((v) => v.filter((x) => x.id !== p.id))}
                     aria-label={`Remove ${p.name}`}
                     style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 0, display: "flex" }}>
@@ -1453,7 +1493,9 @@ function Setup({ onCreate }) {
           )}
           <textarea style={{ ...inputStyle, marginTop: 10, minHeight: 66, resize: "vertical" }}
             value={bulk} onChange={(e) => setBulk(e.target.value)}
-            placeholder="Or paste a list — one name per line" />
+            placeholder={format === "tag"
+              ? "Or paste a list — one team per line, as Name: member, member"
+              : "Or paste a list — one name per line"} />
           {bulk.trim() && <Btn onClick={addBulk} style={{ marginTop: 6 }}>Add pasted names</Btn>}
         </Field>
 
@@ -1462,7 +1504,7 @@ function Setup({ onCreate }) {
             options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: n, label: String(n) }))} />
         </Field>
 
-        <Field label="Bladers advancing from each group">
+        <Field label={`${format === "tag" ? "Teams" : "Bladers"} advancing from each group`}>
           <Segmented value={advance} onChange={setAdvance}
             options={[1, 2, 3, 4].map((n) => ({ value: n, label: String(n) }))} />
         </Field>
@@ -1750,7 +1792,12 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
             ) : (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {g.playerIds.map((id) => (
-                  <Chip key={id} onClick={isAdmin ? () => setMoving(id) : undefined} active={moving === id}>{nameOf(id)}</Chip>
+                  <Chip key={id} onClick={isAdmin ? () => setMoving(id) : undefined} active={moving === id}>
+                    {nameOf(id)}
+                    {membersOf(t, id) && (
+                      <span style={{ color: C.muted, fontSize: 11.5 }}> · {membersOf(t, id).join(", ")}</span>
+                    )}
+                  </Chip>
                 ))}
               </div>
             )}
@@ -2356,8 +2403,8 @@ function PlayersView({ t, nameOf, allMatches, onPlayer }) {
 
   return (
     <div>
-      <SectionHead title="Bladers" color={C.green}
-        sub="Every match a blader has played, group stage and knockout together. Tap for the full record." />
+      <SectionHead title={manyWord(t)} color={C.green}
+        sub={`Every match a ${oneWord(t)} has played, group stage and knockout together. Tap for the full record.`} />
       {rows.map(({ p, st }) => (
         <button key={p.id} onClick={() => onPlayer(p.id)} style={{
           width: "100%", display: "flex", alignItems: "center", gap: 12,
@@ -2409,6 +2456,11 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="bx-d" style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.05 }}>{nameOf(playerId)}</div>
           {group && <div style={{ fontSize: 12, color: col }}>{group.name}</div>}
+          {membersOf(t, playerId) && (
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>
+              {membersOf(t, playerId).join(" · ")}
+            </div>
+          )}
         </div>
       </div>
 
