@@ -34,12 +34,20 @@ export const signOut = () => supabase.auth.signOut();
  * which Supabase owns and newer projects refuse to let anyone hook.
  * Safe to call on every sign-in; it does nothing when the row exists.
  */
-export async function loadProfile() {
+export async function loadProfile(userId) {
   const { error: rpcError } = await supabase.rpc("ensure_profile");
   if (rpcError) console.error(rpcError);
 
+  /*
+   * Filtered by id deliberately, rather than leaning on the row policy to
+   * return one row. That policy is "your own row, or any row if you are
+   * staff" — so for a staff account it returns everybody, maybeSingle fails
+   * on the extra rows, and the profile comes back null. Which reads as "not
+   * approved for hosting", on the one account that certainly is.
+   */
   const { data, error } = await supabase
-    .from("profiles").select("id, email, display_name, approved, is_staff").maybeSingle();
+    .from("profiles").select("id, email, display_name, approved, is_staff")
+    .eq("id", userId).maybeSingle();
   if (error) { console.error(error); return null; }
   return data;
 }

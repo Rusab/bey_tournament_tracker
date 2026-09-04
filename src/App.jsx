@@ -3194,7 +3194,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session) { setProfile(null); setEvents([]); return; }
-    loadProfile().then(setProfile);
+    loadProfile(session.user.id).then(setProfile);
     myEvents(session.user.id).then(setEvents);
   }, [session]);
 
