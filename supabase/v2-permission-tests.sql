@@ -26,16 +26,34 @@ declare
 
   ok boolean;
 begin
-  select id into host_id  from profiles where approved and is_staff limit 1;
-  select id into other_id from profiles where not approved order by created_at limit 1;
-  select id into ref_id   from profiles where not approved order by created_at desc limit 1;
+  -- Ordered by id, not created_at. Profiles inserted by the schema's backfill
+  -- all share one created_at — now() is transaction time — so ascending and
+  -- descending returned the same row, and the "stranger" was the referee.
+  select id into host_id  from profiles where approved and is_staff order by id limit 1;
+  select id into ref_id   from profiles where not approved and id <> host_id order by id limit 1;
+  select id into other_id from profiles
+    where not approved and id <> host_id and id <> ref_id order by id limit 1;
 
-  if host_id is null or other_id is null then
-    insert into rls_results values (0, 'accounts present',
-      'an approved host and at least one unapproved account',
-      'missing — approve yourself first', false);
+  if host_id is null then
+    insert into rls_results values (0, 'an approved staff account exists',
+      'yes', 'no — approve yourself first', false);
     return;
   end if;
+
+  if ref_id is null or other_id is null then
+    insert into rls_results values (0, 'three distinct accounts to test with',
+      'a host, a referee and an unrelated account',
+      'only ' || (select count(*) from profiles) || ' account(s) exist, so a stranger '
+        || 'cannot be told apart from the referee', false);
+    return;
+  end if;
+
+  -- Shown so the run is self-explaining, and so two roles can never silently
+  -- turn out to be the same person again.
+  insert into rls_results
+  select 0, 'accounts under test', 'three different people',
+         string_agg(p.email, ', ' order by p.email), count(distinct p.id) = 3
+  from profiles p where p.id in (host_id, ref_id, other_id);
 
   -- A tournament to test against, owned by the host.
   insert into events (owner_id, name, format, data)
