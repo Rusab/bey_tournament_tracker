@@ -28,8 +28,21 @@ const FINISHES = [
    listed or tallied. */
 const PENALTY = { key: "penalty", label: "Penalty", pts: 1 };
 
+/* Nor is a self-KO. The point comes from the other bey going out on its own,
+   and what it is worth is the organiser's to set, so the value here is only
+   the default and the label. */
+const SELF = { key: "self", label: "Self-KO", pts: 1 };
+
+/** What a self-KO is worth here, and whether it is used at all. */
+const defaultSelfKO = () => ({ enabled: true, pts: 1 });
+const selfKOFor = (t) => {
+  const s = t && t.selfKO;
+  if (!s) return defaultSelfKO();          // tournaments made before the option
+  return { enabled: s.enabled !== false, pts: Math.max(1, num(s.pts) || 1) };
+};
+
 /** Everything that can put a point on the board. */
-const AWARDS = [...FINISHES, PENALTY];
+const AWARDS = [...FINISHES, PENALTY, SELF];
 
 /** Tolerates unknown keys so old saved tournaments never crash the view. */
 const awardOf = (key) => AWARDS.find((a) => a.key === key);
@@ -1489,6 +1502,7 @@ function Setup({ onCreate }) {
   const [points, setPoints] = useState(defaultPoints());
   const [leaguePoints, setLeaguePoints] = useState(defaultLeaguePoints());
   const [bestOf, setBestOf] = useState(defaultBestOf());
+  const [selfKO, setSelfKO] = useState(defaultSelfKO());
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
@@ -1555,7 +1569,7 @@ function Setup({ onCreate }) {
     if (league) {
       const table = [{ id: "g0", name: "League", playerIds: players.map((p) => p.id) }];
       onCreate({
-        name: name.trim(), format, players, groups: table, points, bestOf: defaultBestOf(),
+        name: name.trim(), format, players, groups: table, points, bestOf: defaultBestOf(), selfKO,
         leaguePoints, advance: 1, koSize: 0, thirdPlace: false,
         groupMatches: buildGroupMatches(table), bracket: null, bgUrl, logoUrl,
       });
@@ -1566,7 +1580,7 @@ function Setup({ onCreate }) {
       id: "g" + i, name: "Group " + GROUP_LETTERS[i], playerIds: [],
     }));
     onCreate({
-      name: name.trim(), format, players, groups, points, bestOf, advance,
+      name: name.trim(), format, players, groups, points, bestOf, selfKO, advance,
       koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl, logoUrl,
     });
   };
@@ -1597,7 +1611,22 @@ function Setup({ onCreate }) {
 
         <Field label="Tournament name">
           <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="Xtreme Clash S2" />
+            placeholder="Enter name" />
+        </Field>
+
+        <Field label="Self-KO"
+          hint="A bey that goes out on its own hands the point to the other side. Turn it off to score only the finishes above it.">
+          <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, cursor: "pointer" }}>
+            <input type="checkbox" checked={selfKO.enabled}
+              onChange={(e) => setSelfKO((v) => ({ ...v, enabled: e.target.checked }))}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Count a self-KO</span>
+          </label>
+          {selfKO.enabled && (
+            <Segmented value={selfKO.pts}
+              onChange={(v) => setSelfKO((x) => ({ ...x, pts: v }))}
+              options={[{ value: 1, label: "Worth 1" }, { value: 2, label: "Worth 2" }]} />
+          )}
         </Field>
 
         <Field label="Format"
@@ -2363,6 +2392,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
    * fall out of step. A best of 1 is the same code path with one set.
    */
   const bestOf = bestOfFor(match, t);
+  const selfKO = selfKOFor(t);
   const run = splitSets(events, target, bestOf);
   const over = run.decided;
 
@@ -2444,11 +2474,19 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
           {FINISHES.map((f) => awardBtn(f))}
         </div>
-        {/* Set apart from the finishes — the point comes from the opponent's foul. */}
-        {awardBtn(PENALTY, {
-          marginTop: 6, background: "transparent",
-          borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
-        })}
+        {/* Set apart from the finishes: these are points the other side gave
+            away, not points won on the beystadium. */}
+        <div style={{
+          display: "grid", gap: 6, marginTop: 6,
+          gridTemplateColumns: selfKO.enabled ? "1fr 1fr" : "1fr",
+        }}>
+          {awardBtn(PENALTY, {
+            background: "transparent", borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
+          })}
+          {selfKO.enabled && awardBtn({ ...SELF, pts: selfKO.pts }, {
+            background: "transparent", borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
+          })}
+        </div>
       </div>
     );
   };
@@ -2990,6 +3028,7 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
   const [confirm, setConfirm] = useState(false);
   const [askClear, setAskClear] = useState(false);
   const scored = scoredCount(t);
+  const selfKO = selfKOFor(t);
 
   /* Scores go, the shape of the tournament stays. The bracket goes too: it was
      seeded from standings that no longer exist, so it would be a fiction. */
@@ -3033,6 +3072,23 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
           hint="Faded far behind the scoreboard. Resized in your browser before upload, so spectators load about 100KB no matter how big the original is.">
           <ImagePicker kind="bg" value={t.bgUrl || null}
             onChange={(url) => update((d) => { d.bgUrl = url; return d; })} />
+        </Field>
+
+        <Field label="Self-KO"
+          hint="Applies to matches scored from now on. Results already saved keep whatever they recorded.">
+          <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, cursor: "pointer" }}>
+            <input type="checkbox" checked={selfKO.enabled}
+              onChange={(e) => update((d) => {
+                d.selfKO = { ...selfKOFor(d), enabled: e.target.checked }; return d;
+              })}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Count a self-KO</span>
+          </label>
+          {selfKO.enabled && (
+            <Segmented value={selfKO.pts}
+              onChange={(v) => update((d) => { d.selfKO = { ...selfKOFor(d), pts: v }; return d; })}
+              options={[{ value: 1, label: "Worth 1" }, { value: 2, label: "Worth 2" }]} />
+          )}
         </Field>
 
         <Field label="Points to win a match"
