@@ -3415,11 +3415,20 @@ function ApprovalsSheet({ onClose }) {
  * everyone who opens this is here to watch, not to score.
  */
 function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals }) {
+  const hosted = mine.filter((e) => e.role === "owner");
+  const reffed = mine.filter((e) => e.role === "referee");
+
+  // Anything listed above is kept out of the public list below, so a
+  // tournament appears once — under the heading that says what you can do
+  // to it, rather than twice with different implications.
+  const own = new Set(mine.map((e) => e.id));
+  const rest = all.filter((e) => !own.has(e.id));
+
   // Grouped by organiser, each group newest first, the groups themselves
   // ordered by whoever started something most recently.
   const groups = [];
   const byOwner = new Map();
-  all.forEach((e) => {
+  rest.forEach((e) => {
     if (!byOwner.has(e.owner_id)) {
       const g = { owner: e.owner_id, organiser: e.organiser, events: [] };
       byOwner.set(e.owner_id, g);
@@ -3428,11 +3437,11 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
     byOwner.get(e.owner_id).events.push(e);
   });
 
-  const Row = ({ e, tag }) => (
+  const Row = ({ e, accent }) => (
     <button onClick={() => onOpen(e)} style={{
       width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
       background: C.surface, border: `1px solid ${C.line}`,
-      borderLeft: `3px solid ${C.magenta}`,
+      borderLeft: `3px solid ${accent || C.magenta}`,
       borderRadius: 3, padding: 13, marginBottom: 7, cursor: "pointer", color: C.ink,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -3442,12 +3451,24 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
         }}>{e.name}</div>
         <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
           {FORMAT_LABEL[e.format] || e.format}
-          {tag ? ` · ${tag}` : ""}
           {e.created_at ? ` · ${new Date(e.created_at).toLocaleDateString()}` : ""}
         </div>
       </div>
       <ChevronRight size={16} color={C.muted} />
     </button>
+  );
+
+  // The heading a section is known by. What you can do to the tournaments
+  // underneath is the thing being named, so the count sits with it.
+  const Heading = ({ title, color, n, right }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+      <span style={{ width: 20, height: 3, background: color, transform: "skewX(-30deg)" }} />
+      <span className="bx-d" style={{ fontSize: 15, fontWeight: 700 }}>{title}</span>
+      <span style={{ fontSize: 12, color: C.muted }}>
+        {n} tournament{n === 1 ? "" : "s"}
+      </span>
+      {right ? <div style={{ marginLeft: "auto" }}>{right}</div> : null}
+    </div>
   );
 
   return (
@@ -3485,7 +3506,7 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
           <div style={{ marginBottom: 26 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
               <span className="bx-d" style={{ fontSize: 14, color: C.muted }}>
-                Yours · {profile.email}
+                Signed in · {profile.email}
               </span>
               {profile.is_staff && (
                 <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
@@ -3496,13 +3517,13 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
 
             {profile.approved ? (
               <Btn onClick={onNew} tone="primary"
-                style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5, marginBottom: 10 }}>
+                style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5 }}>
                 <Plus size={16} />New tournament
               </Btn>
             ) : (
               <div style={{
                 background: `${C.gold}14`, border: `1px solid ${C.gold}55`, borderRadius: 3,
-                padding: "12px 14px", marginBottom: 10, display: "flex", gap: 10,
+                padding: "12px 14px", display: "flex", gap: 10,
               }}>
                 <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
                 <div style={{ fontSize: 13, lineHeight: 1.5 }}>
@@ -3511,14 +3532,44 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
                 </div>
               </div>
             )}
+          </div>
+        )}
 
-            {mine.map((e) => (
-              <Row key={e.id} e={e} tag={e.role === "referee" ? "refereeing" : "yours"} />
+        {/* Yours to run. */}
+        {hosted.length > 0 && (
+          <div style={{ marginBottom: 26 }}>
+            <Heading title="Hosted" color={C.magenta} n={hosted.length} />
+            {hosted.map((e) => <Row key={e.id} e={e} accent={C.magenta} />)}
+          </div>
+        )}
+
+        {/* Somebody else's, but you keep the score. */}
+        {reffed.length > 0 && (
+          <div style={{ marginBottom: 26 }}>
+            <Heading title="Refereeing" color={C.gold} n={reffed.length} />
+            {reffed.map((e) => <Row key={e.id} e={e} accent={C.gold} />)}
+          </div>
+        )}
+
+        {/* Everything else, to watch. */}
+        {rest.length > 0 && (
+          <div>
+            <Heading title="Watch" color={C.cyan} n={rest.length} />
+            {groups.map((g) => (
+              <div key={g.owner} style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <Blade color={C.cyan} h={14} />
+                  <span className="bx-d" style={{ fontSize: 14, fontWeight: 700, color: C.muted }}>
+                    {g.organiser}
+                  </span>
+                </div>
+                {g.events.map((e) => <Row key={e.id} e={e} accent={C.cyan} />)}
+              </div>
             ))}
           </div>
         )}
 
-        {all.length === 0 ? (
+        {all.length === 0 && (
           <div style={{ ...card, textAlign: "center", padding: "40px 20px" }}>
             <div className="bx-d" style={{ fontSize: 20, fontWeight: 700, marginBottom: 7 }}>
               Nothing running yet
@@ -3527,19 +3578,6 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
               Tournaments appear here as organisers start them.
             </div>
           </div>
-        ) : (
-          groups.map((g) => (
-            <div key={g.owner} style={{ marginBottom: 22 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <Blade color={C.cyan} h={14} />
-                <span className="bx-d" style={{ fontSize: 15, fontWeight: 700 }}>{g.organiser}</span>
-                <span style={{ fontSize: 12, color: C.muted }}>
-                  {g.events.length} tournament{g.events.length === 1 ? "" : "s"}
-                </span>
-              </div>
-              {g.events.map((e) => <Row key={e.id} e={e} />)}
-            </div>
-          ))
         )}
       </div>
     </div>
