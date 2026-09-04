@@ -226,6 +226,22 @@ function winnerOf(m) {
   if (!m || !m.done) return null;
   if (m.p1 && !m.p2) return m.p1;
   if (m.p2 && !m.p1) return m.p2;
+
+  /*
+   * Sets decide a best-of, and they are recorded on the match so that the
+   * winner can be read anywhere — propagate() advances a bracket without ever
+   * seeing the tournament, and so has no target to replay against.
+   *
+   * Points cannot stand in: a side can take more points across the match and
+   * still lose it, by winning one set heavily and losing two narrowly.
+   */
+  if (m.sets && m.sets.length) {
+    let w1 = 0, w2 = 0;
+    m.sets.forEach((s) => { if (s.s1 > s.s2) w1++; else if (s.s2 > s.s1) w2++; });
+    if (w1 === w2) return null;
+    return w1 > w2 ? m.p1 : m.p2;
+  }
+
   const { s1, s2 } = scoreOf(m);
   if (s1 === s2) return null;
   return s1 > s2 ? m.p1 : m.p2;
@@ -264,6 +280,49 @@ function stageOf(m, t) {
 }
 
 const targetFor = (m, t) => t.points[stageOf(m, t)] ?? t.points.group;
+
+/** How many sets a stage is played over. Absent or 1 means a single set. */
+const defaultBestOf = () => ({ group: 1, r16: 1, qf: 1, sf: 1, final: 1, third: 1 });
+const bestOfFor = (m, t) => Math.max(1, (t.bestOf && t.bestOf[stageOf(m, t)]) || 1);
+const setsToWin = (bestOf) => Math.floor(bestOf / 2) + 1;
+
+/** Sets each side took, from the summary stored on a finished match. */
+function setWins(m) {
+  let w1 = 0, w2 = 0;
+  (m.sets || []).forEach((s) => { if (s.s1 > s.s2) w1++; else if (s.s2 > s.s1) w2++; });
+  return { w1, w2 };
+}
+
+/**
+ * Replays the finishes into sets, each run to `target`.
+ *
+ * Sets are derived rather than stored, so undo stays "drop the last finish"
+ * and everything downstream recomputes — no separate set state to get out of
+ * step with the finish log.
+ *
+ * It stops the moment the match is won: take the first two of three and the
+ * third is never played, so it is not counted and the points are those of the
+ * two sets actually contested.
+ */
+function splitSets(events, target, bestOf) {
+  const need = setsToWin(bestOf);
+  const sets = [];
+  let cur = { s1: 0, s2: 0 };
+  let w1 = 0, w2 = 0;
+
+  for (const e of events || []) {
+    if (w1 >= need || w2 >= need) break;
+    if (e.side === 1) cur.s1 += e.pts; else cur.s2 += e.pts;
+    if (cur.s1 >= target || cur.s2 >= target) {
+      sets.push(cur);
+      if (cur.s1 > cur.s2) w1++; else if (cur.s2 > cur.s1) w2++;
+      cur = { s1: 0, s2: 0 };
+    }
+  }
+
+  const decided = w1 >= need || w2 >= need;
+  return { sets, current: cur, w1, w2, need, decided };
+}
 
 /* ---- fixtures ---- */
 
@@ -317,8 +376,15 @@ function computeStandings(playerIds, matches, nameOf, lp) {
     const { s1, s2 } = scoreOf(m);
     a.played++; b.played++;
     a.pf += s1; a.pa += s2; b.pf += s2; b.pa += s1;
-    if (s1 > s2) { a.wins++; b.losses++; a.winMargin += s1 - s2; }
-    else if (s2 > s1) { b.wins++; a.losses++; b.winMargin += s2 - s1; }
+
+    /*
+     * Who won is winnerOf's call, not the point totals'. Over a best-of, the
+     * side with more points can be the side that lost. The margin stays in
+     * points either way, so a dominant win still outranks a scrape.
+     */
+    const w = winnerOf(m);
+    if (w === m.p1) { a.wins++; b.losses++; a.winMargin += s1 - s2; }
+    else if (w === m.p2) { b.wins++; a.losses++; b.winMargin += s2 - s1; }
     else { a.draws++; b.draws++; }
   });
 
@@ -353,9 +419,10 @@ function swissKings(t) {
     const a = rec[m.p1], b = rec[m.p2];
     if (!a || !b) return;
     const { s1, s2 } = scoreOf(m);
+    const w = winnerOf(m);
     a.played++; b.played++;
-    if (s1 > s2) { a.wins++; a.margin += s1 - s2; }
-    else if (s2 > s1) { b.wins++; b.margin += s2 - s1; }
+    if (w === m.p1) { a.wins++; a.margin += s1 - s2; }
+    else if (w === m.p2) { b.wins++; b.margin += s2 - s1; }
   });
 
   const played = Object.values(rec).filter((r) => r.played > 0);
@@ -407,17 +474,18 @@ function finalStandings(t, cfg) {
     const st = cfg.stages[stageOf(m, t)] || { play: 0, win: 0 };
     const { s1, s2 } = scoreOf(m);
 
-    [[a, s1, s2], [b, s2, s1]].forEach(([r, mine, theirs]) => {
+    const won = winnerOf(m);
+    [[a, s1, s2, m.p1], [b, s2, s1, m.p2]].forEach(([r, mine, theirs, who]) => {
       r.played++; r.pf += mine; r.pa += theirs;
       r.total += num(st.play);
       r.bonus += num(st.play);
-      if (mine > theirs) {
+      if (won === who) {
         r.wins++;
         r.margin += mine - theirs;
         r.total += num(cfg.perWin) + num(st.win) + (mine - theirs) * num(cfg.perMargin);
         r.bonus += num(st.win);
-      } else if (theirs > mine) {
-        r.losses++;
+      } else if (won) {
+        r.losses++;   // somebody won it, and it was not this one
       }
     });
   });
@@ -484,7 +552,7 @@ function buildFinalCSV(t, cfg, rows, kings) {
 
   out.push(csvRow(["MATCHES"]));
   out.push(csvRow(["Stage", "Group", "Blader A", "Blader B", "Score A", "Score B",
-    "Winner", "Points in order"]));
+    "Sets", "Winner", "Points in order"]));
 
   const all = [
     ...t.groupMatches,
@@ -498,10 +566,14 @@ function buildFinalCSV(t, cfg, rows, kings) {
     const seq = (m.events || [])
       .map((e, i) => `${i + 1}. ${nameOf(e.side === 1 ? m.p1 : m.p2)} ${(awardOf(e.type) || { label: e.type }).label} +${e.pts}`)
       .join("; ");
+    // Score A and B stay the points across the whole match; the set column
+    // carries what actually decided it, so neither reading is lost.
+    const sets = (m.sets || []).map((x) => `${x.s1}-${x.s2}`).join(" ");
     out.push(csvRow([
       stageLabel(stageOf(m, t)), groupName(m.groupId),
       m.p1 ? nameOf(m.p1) : "", m.p2 ? nameOf(m.p2) : "",
       m.done ? s1 : "", m.done ? s2 : "",
+      sets,
       w ? nameOf(w) : (m.done ? "draw" : "not played"),
       seq,
     ]));
@@ -1121,17 +1193,23 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
 
   const update = (fn) => setT((prev) => fn(structuredClone(prev)));
 
-  const saveScore = (kind, id, events, done) => {
+  /*
+   * The sets are stored beside the finishes because propagate() and every
+   * table read the winner without ever seeing the tournament, and so have no
+   * target to replay the finishes against.
+   */
+  const saveScore = (kind, id, events, done, sets) => {
+    const put = (m) => { m.events = events; m.done = done; m.sets = sets && sets.length > 1 ? sets : null; };
     update((d) => {
       if (kind === "group") {
         const m = d.groupMatches.find((x) => x.id === id);
-        if (m) { m.events = events; m.done = done; }
+        if (m) put(m);
       } else {
         if (d.bracket.third && d.bracket.third.id === id) {
-          d.bracket.third.events = events; d.bracket.third.done = done;
+          put(d.bracket.third);
         } else {
           d.bracket.rounds.forEach((r) => r.forEach((m) => {
-            if (m.id === id) { m.events = events; m.done = done; }
+            if (m.id === id) put(m);
           }));
         }
         d.bracket = propagate(d.bracket);
@@ -1256,7 +1334,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
         <ScoreSheet
           match={scoringMatch} t={t} nameOf={nameOf}
           onClose={() => setScoring(null)}
-          onSave={(events, done) => { saveScore(scoring.kind, scoring.id, events, done); setScoring(null); }}
+          onSave={(events, done, sets) => { saveScore(scoring.kind, scoring.id, events, done, sets); setScoring(null); }}
         />
       )}
       {detail && (
@@ -1342,29 +1420,54 @@ function ImagePicker({ value, onChange, kind = "bg" }) {
 /*  Stage points editor                                                */
 /* ================================================================== */
 
-function StagePoints({ koSize, thirdPlace, points, onChange }) {
+function StagePoints({ koSize, thirdPlace, points, onChange, bestOf, onBestOf }) {
   const stages = stagesFor(koSize, thirdPlace);
+  const of = (key) => Math.max(1, (bestOf && bestOf[key]) || 1);
+
   return (
     <div style={{ display: "grid", gap: 10 }}>
-      {stages.map((s, i) => (
-        <div key={s.key} style={{
-          background: C.base, border: `1px solid ${C.line}`, borderRadius: 3, padding: "11px 12px",
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
-            <Blade color={GROUP_COLORS[i % GROUP_COLORS.length]} h={15} />
-            <span className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{s.label}</span>
-            <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
-              first to {points[s.key]}
-            </span>
+      {stages.map((s, i) => {
+        const tone = GROUP_COLORS[i % GROUP_COLORS.length];
+        const n = of(s.key);
+        return (
+          <div key={s.key} style={{
+            background: C.base, border: `1px solid ${C.line}`, borderRadius: 3, padding: "11px 12px",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+              <Blade color={tone} h={15} />
+              <span className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{s.label}</span>
+              <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
+                {n > 1
+                  ? `${n} sets of ${points[s.key]}, first to ${setsToWin(n)}`
+                  : `first to ${points[s.key]}`}
+              </span>
+            </div>
+            <Segmented
+              value={points[s.key]}
+              onChange={(v) => onChange({ ...points, [s.key]: v })}
+              options={[3, 4, 5, 7, 9].map((x) => ({ value: x, label: String(x) }))}
+              tone={tone}
+            />
+            {onBestOf && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 5 }}>
+                  Played over
+                </div>
+                <Segmented
+                  value={n}
+                  onChange={(v) => onBestOf({ ...(bestOf || {}), [s.key]: v })}
+                  options={[
+                    { value: 1, label: "One set" },
+                    { value: 3, label: "Best of 3" },
+                    { value: 5, label: "Best of 5" },
+                  ]}
+                  tone={tone}
+                />
+              </div>
+            )}
           </div>
-          <Segmented
-            value={points[s.key]}
-            onChange={(v) => onChange({ ...points, [s.key]: v })}
-            options={[3, 4, 5, 7, 9].map((n) => ({ value: n, label: String(n) }))}
-            tone={GROUP_COLORS[i % GROUP_COLORS.length]}
-          />
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1385,6 +1488,7 @@ function Setup({ onCreate }) {
   const [third, setThird] = useState(true);
   const [points, setPoints] = useState(defaultPoints());
   const [leaguePoints, setLeaguePoints] = useState(defaultLeaguePoints());
+  const [bestOf, setBestOf] = useState(defaultBestOf());
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
@@ -1451,7 +1555,7 @@ function Setup({ onCreate }) {
     if (league) {
       const table = [{ id: "g0", name: "League", playerIds: players.map((p) => p.id) }];
       onCreate({
-        name: name.trim(), format, players, groups: table, points,
+        name: name.trim(), format, players, groups: table, points, bestOf: defaultBestOf(),
         leaguePoints, advance: 1, koSize: 0, thirdPlace: false,
         groupMatches: buildGroupMatches(table), bracket: null, bgUrl, logoUrl,
       });
@@ -1462,7 +1566,7 @@ function Setup({ onCreate }) {
       id: "g" + i, name: "Group " + GROUP_LETTERS[i], playerIds: [],
     }));
     onCreate({
-      name: name.trim(), format, players, groups, points, advance,
+      name: name.trim(), format, players, groups, points, bestOf, advance,
       koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl, logoUrl,
     });
   };
@@ -1618,7 +1722,8 @@ function Setup({ onCreate }) {
 
         <Field label="Points to win a match"
           hint="Each stage runs on its own target. A finish that would overshoot is capped — on a first-to-4 match, an Xtreme at 2–1 finishes it 4–1, not 5–1.">
-          <StagePoints koSize={koSize} thirdPlace={third} points={points} onChange={setPoints} />
+          <StagePoints koSize={koSize} thirdPlace={third} points={points} onChange={setPoints}
+            bestOf={bestOf} onBestOf={setBestOf} />
         </Field>
           </>
         )}
@@ -1962,7 +2067,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
       <span className="bx-d" style={{
         fontSize: 19, fontWeight: 800, flexShrink: 0,
         color: m.done ? C.ink : C.muted, minWidth: 50, textAlign: "center",
-      }}>{m.done ? `${s1}–${s2}` : "vs"}</span>
+      }}>{m.done ? (m.sets && m.sets.length ? `${setWins(m).w1}–${setWins(m).w2}` : `${s1}–${s2}`) : "vs"}</span>
       <span style={{
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
         whiteSpace: "nowrap", textAlign: "right", fontWeight: w === m.p2 ? 700 : 400,
@@ -2252,9 +2357,20 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const [askReset, setAskReset] = useState(false);
   const [askLeave, setAskLeave] = useState(false);
   const [askUndo, setAskUndo] = useState(false);
-  const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
-  const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
-  const over = s1 >= target || s2 >= target;
+  /*
+   * Sets are replayed from the finish log rather than tracked alongside it, so
+   * undo stays "drop the last finish" and there is no second piece of state to
+   * fall out of step. A best of 1 is the same code path with one set.
+   */
+  const bestOf = bestOfFor(match, t);
+  const run = splitSets(events, target, bestOf);
+  const over = run.decided;
+
+  // The big numbers are the set being played — or the last one, once the match
+  // is over, since the set in progress resets to nothing the moment it closes.
+  const shown = over && run.sets.length ? run.sets[run.sets.length - 1] : run.current;
+  const s1 = shown.s1;
+  const s2 = shown.s2;
 
   // Nothing here is written until Save, so every way out of this sheet throws
   // away whatever has been tapped in. Ask first — the swipe especially is easy
@@ -2273,12 +2389,24 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
    */
   const tryUndo = () => (match.done && !dirty ? setAskUndo(true) : undo());
 
+  /*
+   * The cap is worked out inside the updater, against the events as they are
+   * at that moment. Taken from the rendered score instead, two taps landing in
+   * the same frame both read the score before either of them counted, and a
+   * first-to-7 set could finish 9-0.
+   *
+   * Capped against the set in progress, not the match: each set runs to the
+   * target on its own.
+   */
   const add = (side, f) => {
-    if (over) return;
-    const cur = side === 1 ? s1 : s2;
-    const pts = Math.min(f.pts, target - cur); // cap at the stage target
-    if (pts <= 0) return;
-    setEvents((v) => [...v, { side, type: f.key, pts, raw: f.pts }]);
+    setEvents((prev) => {
+      const now = splitSets(prev, target, bestOf);
+      if (now.decided) return prev;
+      const cur = side === 1 ? now.current.s1 : now.current.s2;
+      const pts = Math.min(f.pts, target - cur);
+      if (pts <= 0) return prev;
+      return [...prev, { side, type: f.key, pts, raw: f.pts }];
+    });
   };
 
   const Side = ({ side, color }) => {
@@ -2338,8 +2466,15 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <ArrowLeft size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.05 }}>First to {target}</div>
-          <div style={{ fontSize: 11.5, color: C.muted }}>{stageLabel}</div>
+          <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.05 }}>
+            {bestOf > 1
+              ? `Set ${Math.min(run.sets.length + (over ? 0 : 1), bestOf)} · first to ${target}`
+              : `First to ${target}`}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.muted }}>
+            {stageLabel}
+            {bestOf > 1 && ` · best of ${bestOf}, sets ${run.w1}–${run.w2}`}
+          </div>
         </div>
         <Btn onClick={() => (events.length ? setAskReset(true) : null)} tone="ghost"
           disabled={!events.length} style={{ padding: "7px 11px" }}>Reset</Btn>
@@ -2409,6 +2544,27 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <Side side={2} color={C.cyan} />
         </div>
 
+        {bestOf > 1 && run.sets.length > 0 && (
+          <div style={{
+            marginTop: 14, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center",
+          }}>
+            <span style={{ fontSize: 12.5, color: C.muted }}>Sets</span>
+            {run.sets.map((st, i) => (
+              <span key={i} className="bx-d" style={{
+                fontSize: 13.5, fontWeight: 700, padding: "4px 9px", borderRadius: 3,
+                border: `1px solid ${st.s1 > st.s2 ? C.magenta : C.cyan}55`,
+                background: `${st.s1 > st.s2 ? C.magenta : C.cyan}14`,
+                color: st.s1 > st.s2 ? C.magenta : C.cyan,
+              }}>{st.s1}–{st.s2}</span>
+            ))}
+            {!over && (
+              <span style={{ fontSize: 12.5, color: C.muted }}>
+                first to {run.need} set{run.need > 1 ? "s" : ""} takes it
+              </span>
+            )}
+          </div>
+        )}
+
         {over && (
           <div style={{
             marginTop: 14, padding: "13px 14px", borderRadius: 4,
@@ -2416,7 +2572,12 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
             fontSize: 14.5, display: "flex", alignItems: "center", gap: 9,
           }}>
             <Check size={17} color={C.green} />
-            <span><strong>{nameOf(s1 > s2 ? match.p1 : match.p2)}</strong> takes it {Math.max(s1, s2)}–{Math.min(s1, s2)}</span>
+            <span>
+              <strong>{nameOf(run.w1 > run.w2 ? match.p1 : match.p2)}</strong> takes it{" "}
+              {bestOf > 1
+                ? `${Math.max(run.w1, run.w2)}–${Math.min(run.w1, run.w2)} in sets`
+                : `${Math.max(s1, s2)}–${Math.min(s1, s2)}`}
+            </span>
           </div>
         )}
 
@@ -2443,12 +2604,14 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <Btn onClick={tryClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 14 }}>Cancel</Btn>
-          <Btn onClick={() => onSave(events, over)} tone="primary" disabled={!over}
+          <Btn onClick={() => onSave(events, over, run.sets)} tone="primary" disabled={!over}
             style={{ flex: 2, justifyContent: "center", padding: 14, fontSize: 17 }}>Save result</Btn>
         </div>
         {!over && (
           <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, textAlign: "center" }}>
-            Save unlocks when a blader reaches {target}.
+            {bestOf > 1
+              ? `Save unlocks when someone takes ${run.need} set${run.need > 1 ? "s" : ""}.`
+              : `Save unlocks when a ${oneWord(t)} reaches ${target}.`}
           </div>
         )}
       </div>
@@ -2875,7 +3038,8 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
         <Field label="Points to win a match"
           hint="Changing a stage target applies to matches scored from now on. Results already saved keep their scores.">
           <StagePoints koSize={t.koSize} thirdPlace={t.thirdPlace} points={t.points}
-            onChange={(p) => update((d) => { d.points = p; return d; })} />
+            onChange={(p) => update((d) => { d.points = p; return d; })}
+            bestOf={t.bestOf} onBestOf={(b) => update((d) => { d.bestOf = b; return d; })} />
         </Field>
 
         <Field label="Bladers advancing from each group">
