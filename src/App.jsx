@@ -1405,7 +1405,23 @@ function Setup({ onCreate }) {
   const qualifiers = numGroups * advance;
   const tooMany = koSize > 0 && qualifiers > koSize;
   const byes = koSize > 0 ? Math.max(0, koSize - qualifiers) : 0;
-  const ready = players.length >= numGroups * 2 && name.trim() && !tooMany;
+
+  /* The smallest knockout that would hold this many qualifiers, offered as a
+     one-tap fix rather than leaving the arithmetic to be worked out. */
+  const fits = [2, 4, 8, 16].find((n) => n >= qualifiers);
+
+  /*
+   * Why the button is disabled, in the order worth fixing. A greyed-out
+   * button with the reason somewhere further up the page reads as broken.
+   */
+  const blocker = !name.trim()
+    ? "Give the tournament a name first."
+    : players.length < numGroups * 2
+      ? `${numGroups} groups need at least ${numGroups * 2} bladers, and there ${players.length === 1 ? "is" : "are"} ${players.length}.`
+      : tooMany
+        ? `${numGroups} groups × ${advance} advancing makes ${qualifiers} qualifiers, and the knockout only has ${koSize} places.`
+        : null;
+  const ready = !blocker;
 
   const create = () => {
     const groups = Array.from({ length: numGroups }, (_, i) => ({
@@ -1535,9 +1551,30 @@ function Setup({ onCreate }) {
           style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 18, marginTop: 8 }}>
           Create tournament <ChevronRight size={18} />
         </Btn>
-        {!ready && players.length < numGroups * 2 && (
-          <div style={{ color: C.muted, fontSize: 13, marginTop: 10, textAlign: "center" }}>
-            Add at least {numGroups * 2} bladers for {numGroups} groups.
+
+        {blocker && (
+          <div style={{
+            marginTop: 12, padding: "12px 14px", borderRadius: 3,
+            background: `${C.gold}14`, border: `1px solid ${C.gold}55`,
+            display: "flex", gap: 10, alignItems: "flex-start",
+          }}>
+            <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+              {blocker}
+              {tooMany && fits && (
+                <div style={{ marginTop: 10 }}>
+                  <Btn onClick={() => setKoSize(fits)} tone="cool" style={{ padding: "8px 12px", fontSize: 14 }}>
+                    Start the knockout at {roundName(fits).toLowerCase()}
+                  </Btn>
+                </div>
+              )}
+              {tooMany && !fits && (
+                <div style={{ marginTop: 6, color: C.muted }}>
+                  More than 16 qualifiers is beyond the biggest knockout — reduce the
+                  groups, or how many advance from each.
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
