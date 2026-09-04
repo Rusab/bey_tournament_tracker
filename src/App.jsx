@@ -4,12 +4,13 @@ import {
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
   Image as ImageIcon, Download, Crown,
 } from "lucide-react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+import { supabase } from "./lib/supabase.js";
+import {
+  loadEvent, eventStamp, saveEvent, subscribeEvent,
+  currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
+  myEvents, publicEvents, createEvent, archiveEvent, deleteEvent,
+  eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
+} from "./lib/db.js";
 
 /* ================================================================== */
 /*  Domain                                                             */
@@ -27,69 +28,63 @@ const FINISHES = [
    listed or tallied. */
 const PENALTY = { key: "penalty", label: "Penalty", pts: 1 };
 
+/* Nor is a self-KO. The point comes from the other bey going out on its own,
+   and what it is worth is the organiser's to set, so the value here is only
+   the default and the label. */
+const SELF = { key: "self", label: "Self-KO", pts: 1 };
+
+/** What a self-KO is worth here, and whether it is used at all. */
+const defaultSelfKO = () => ({ enabled: true, pts: 1 });
+const selfKOFor = (t) => {
+  const s = t && t.selfKO;
+  if (!s) return defaultSelfKO();          // tournaments made before the option
+  return { enabled: s.enabled !== false, pts: Math.max(1, num(s.pts) || 1) };
+};
+
 /** Everything that can put a point on the board. */
-const AWARDS = [...FINISHES, PENALTY];
+const AWARDS = [...FINISHES, PENALTY, SELF];
 
 /** Tolerates unknown keys so old saved tournaments never crash the view. */
 const awardOf = (key) => AWARDS.find((a) => a.key === key);
 
 const GROUP_LETTERS = "ABCDEFGH".split("");
-const ROW_ID = "current"; // one row holds the live tournament
+
+/*
+ * A league is one group holding everyone, played as a round robin, with no
+ * knockout after it — so the fixtures, the scoring and the match views are the
+ * ones already here. The only genuinely new part is ranking on league points
+ * rather than on wins.
+ */
+const isLeague = (t) => t && t.format === "league";
+const defaultLeaguePoints = () => ({ win: "3", draw: "1" });
+
+/** Which tabs a format has: no groups to draw, and no bracket to build. */
+const tabsFor = (t) =>
+  isLeague(t) ? ["matches", "table", "players"] : TABS;
+
+/* A team is a competitor like any other; only the wording changes. */
+const isTag = (t) => t && t.format === "tag";
+const oneWord = (t) => (isTag(t) ? "team" : "blader");
+const manyWord = (t) => (isTag(t) ? "Teams" : "Bladers");
+const membersOf = (t, id) => {
+  const p = (t.players || []).find((x) => x.id === id);
+  return p && p.members && p.members.length ? p.members : null;
+};
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-/* ------------------------------------------------------------------
-   Persistence adapter. Everything the app saves goes through here.
-   Backed by Supabase: the "tournaments" table + row-level security
-   policies are what actually stop writes from anyone not signed in —
-   see SETUP.md.
------------------------------------------------------------------- */
-const store = {
-  /** The whole row — the tournament plus the timestamp used to spot changes. */
-  async loadRow() {
-    const { data, error } = await supabase
-      .from("tournaments").select("data, updated_at").eq("id", ROW_ID).maybeSingle();
-    if (error) { console.error(error); return null; }
-    return data || null;
-  },
-
-  /**
-   * Just the timestamp — a few hundred bytes. Polling this instead of the whole
-   * tournament is what makes a safety-net poll affordable with a hall full of
-   * spectators: the 50KB board is only fetched when it has actually changed.
-   */
-  async stamp() {
-    const { data, error } = await supabase
-      .from("tournaments").select("updated_at").eq("id", ROW_ID).maybeSingle();
-    if (error) return null;
-    return data ? data.updated_at : null;
-  },
-
-  async save(value) {
-    const { data, error } = await supabase
-      .from("tournaments")
-      .upsert({ id: ROW_ID, data: value, updated_at: new Date().toISOString() })
-      .select("updated_at").maybeSingle();
-    if (error) { console.error(error); return null; }
-    return data ? data.updated_at : null;
-  },
-
-  /**
-   * Realtime is the fast path, not the only path. onStatus reporting SUBSCRIBED
-   * means the socket opened — it does NOT prove row changes are being delivered
-   * (a table missing from the supabase_realtime publication connects happily and
-   * then says nothing), so the poll in App runs regardless.
-   */
-  subscribe(onChange, onStatus) {
-    const ch = supabase
-      .channel("tournament")
-      .on("postgres_changes",
-          { event: "*", schema: "public", table: "tournaments", filter: `id=eq.${ROW_ID}` },
-          (payload) => { if (payload.new && payload.new.data) onChange(payload.new.data, payload.new.updated_at); })
-      .subscribe((status) => { if (onStatus) onStatus(status); });
-    return () => supabase.removeChannel(ch);
-  },
-};
+/*
+ * The board reads and writes one tournament, named by id. Which tournaments an
+ * account may write is not decided here at all — the database decides, through
+ * row policies and column grants — so `canEdit` below only governs what the
+ * interface offers, never what is permitted.
+ */
+const storeFor = (eventId) => ({
+  loadRow: () => loadEvent(eventId),
+  stamp: () => eventStamp(eventId),
+  save: (value) => saveEvent(eventId, { data: value }),
+  subscribe: (onChange, onStatus) => subscribeEvent(eventId, onChange, onStatus),
+});
 
 /** How often to ask "has anything changed?" when realtime is quiet. */
 const POLL_MS = 15000;
@@ -244,6 +239,22 @@ function winnerOf(m) {
   if (!m || !m.done) return null;
   if (m.p1 && !m.p2) return m.p1;
   if (m.p2 && !m.p1) return m.p2;
+
+  /*
+   * Sets decide a best-of, and they are recorded on the match so that the
+   * winner can be read anywhere — propagate() advances a bracket without ever
+   * seeing the tournament, and so has no target to replay against.
+   *
+   * Points cannot stand in: a side can take more points across the match and
+   * still lose it, by winning one set heavily and losing two narrowly.
+   */
+  if (m.sets && m.sets.length) {
+    let w1 = 0, w2 = 0;
+    m.sets.forEach((s) => { if (s.s1 > s.s2) w1++; else if (s.s2 > s.s1) w2++; });
+    if (w1 === w2) return null;
+    return w1 > w2 ? m.p1 : m.p2;
+  }
+
   const { s1, s2 } = scoreOf(m);
   if (s1 === s2) return null;
   return s1 > s2 ? m.p1 : m.p2;
@@ -283,6 +294,49 @@ function stageOf(m, t) {
 
 const targetFor = (m, t) => t.points[stageOf(m, t)] ?? t.points.group;
 
+/** How many sets a stage is played over. Absent or 1 means a single set. */
+const defaultBestOf = () => ({ group: 1, r16: 1, qf: 1, sf: 1, final: 1, third: 1 });
+const bestOfFor = (m, t) => Math.max(1, (t.bestOf && t.bestOf[stageOf(m, t)]) || 1);
+const setsToWin = (bestOf) => Math.floor(bestOf / 2) + 1;
+
+/** Sets each side took, from the summary stored on a finished match. */
+function setWins(m) {
+  let w1 = 0, w2 = 0;
+  (m.sets || []).forEach((s) => { if (s.s1 > s.s2) w1++; else if (s.s2 > s.s1) w2++; });
+  return { w1, w2 };
+}
+
+/**
+ * Replays the finishes into sets, each run to `target`.
+ *
+ * Sets are derived rather than stored, so undo stays "drop the last finish"
+ * and everything downstream recomputes — no separate set state to get out of
+ * step with the finish log.
+ *
+ * It stops the moment the match is won: take the first two of three and the
+ * third is never played, so it is not counted and the points are those of the
+ * two sets actually contested.
+ */
+function splitSets(events, target, bestOf) {
+  const need = setsToWin(bestOf);
+  const sets = [];
+  let cur = { s1: 0, s2: 0 };
+  let w1 = 0, w2 = 0;
+
+  for (const e of events || []) {
+    if (w1 >= need || w2 >= need) break;
+    if (e.side === 1) cur.s1 += e.pts; else cur.s2 += e.pts;
+    if (cur.s1 >= target || cur.s2 >= target) {
+      sets.push(cur);
+      if (cur.s1 > cur.s2) w1++; else if (cur.s2 > cur.s1) w2++;
+      cur = { s1: 0, s2: 0 };
+    }
+  }
+
+  const decided = w1 >= need || w2 >= need;
+  return { sets, current: cur, w1, w2, need, decided };
+}
+
 /* ---- fixtures ---- */
 
 function roundRobin(ids) {
@@ -317,10 +371,16 @@ function buildGroupMatches(groups, existing = []) {
   return out;
 }
 
-function computeStandings(playerIds, matches, nameOf) {
+/**
+ * @param lp  league points, e.g. { win: "3", draw: "1" }. When given, the table
+ *            ranks on points earned rather than on wins. A draw is all but
+ *            impossible while a match runs to a target, but it costs nothing to
+ *            count and would otherwise silently score zero.
+ */
+function computeStandings(playerIds, matches, nameOf, lp) {
   const rec = {};
   playerIds.forEach((id) => {
-    rec[id] = { id, played: 0, wins: 0, losses: 0, pf: 0, pa: 0, winMargin: 0 };
+    rec[id] = { id, played: 0, wins: 0, losses: 0, draws: 0, pts: 0, pf: 0, pa: 0, winMargin: 0 };
   });
   matches.forEach((m) => {
     if (!m.done) return;
@@ -329,11 +389,25 @@ function computeStandings(playerIds, matches, nameOf) {
     const { s1, s2 } = scoreOf(m);
     a.played++; b.played++;
     a.pf += s1; a.pa += s2; b.pf += s2; b.pa += s1;
-    if (s1 > s2) { a.wins++; b.losses++; a.winMargin += s1 - s2; }
-    else if (s2 > s1) { b.wins++; a.losses++; b.winMargin += s2 - s1; }
+
+    /*
+     * Who won is winnerOf's call, not the point totals'. Over a best-of, the
+     * side with more points can be the side that lost. The margin stays in
+     * points either way, so a dominant win still outranks a scrape.
+     */
+    const w = winnerOf(m);
+    if (w === m.p1) { a.wins++; b.losses++; a.winMargin += s1 - s2; }
+    else if (w === m.p2) { b.wins++; a.losses++; b.winMargin += s2 - s1; }
+    else { a.draws++; b.draws++; }
   });
+
+  if (lp) {
+    Object.values(rec).forEach((r) => { r.pts = r.wins * num(lp.win) + r.draws * num(lp.draw); });
+  }
+
   return Object.values(rec).sort(
     (x, y) =>
+      (lp ? y.pts - x.pts : 0) ||
       y.wins - x.wins ||
       y.winMargin - x.winMargin ||
       (y.pf - y.pa) - (x.pf - x.pa) ||
@@ -358,9 +432,10 @@ function swissKings(t) {
     const a = rec[m.p1], b = rec[m.p2];
     if (!a || !b) return;
     const { s1, s2 } = scoreOf(m);
+    const w = winnerOf(m);
     a.played++; b.played++;
-    if (s1 > s2) { a.wins++; a.margin += s1 - s2; }
-    else if (s2 > s1) { b.wins++; b.margin += s2 - s1; }
+    if (w === m.p1) { a.wins++; a.margin += s1 - s2; }
+    else if (w === m.p2) { b.wins++; b.margin += s2 - s1; }
   });
 
   const played = Object.values(rec).filter((r) => r.played > 0);
@@ -412,17 +487,18 @@ function finalStandings(t, cfg) {
     const st = cfg.stages[stageOf(m, t)] || { play: 0, win: 0 };
     const { s1, s2 } = scoreOf(m);
 
-    [[a, s1, s2], [b, s2, s1]].forEach(([r, mine, theirs]) => {
+    const won = winnerOf(m);
+    [[a, s1, s2, m.p1], [b, s2, s1, m.p2]].forEach(([r, mine, theirs, who]) => {
       r.played++; r.pf += mine; r.pa += theirs;
       r.total += num(st.play);
       r.bonus += num(st.play);
-      if (mine > theirs) {
+      if (won === who) {
         r.wins++;
         r.margin += mine - theirs;
         r.total += num(cfg.perWin) + num(st.win) + (mine - theirs) * num(cfg.perMargin);
         r.bonus += num(st.win);
-      } else if (theirs > mine) {
-        r.losses++;
+      } else if (won) {
+        r.losses++;   // somebody won it, and it was not this one
       }
     });
   });
@@ -489,7 +565,7 @@ function buildFinalCSV(t, cfg, rows, kings) {
 
   out.push(csvRow(["MATCHES"]));
   out.push(csvRow(["Stage", "Group", "Blader A", "Blader B", "Score A", "Score B",
-    "Winner", "Points in order"]));
+    "Sets", "Winner", "Points in order"]));
 
   const all = [
     ...t.groupMatches,
@@ -503,10 +579,14 @@ function buildFinalCSV(t, cfg, rows, kings) {
     const seq = (m.events || [])
       .map((e, i) => `${i + 1}. ${nameOf(e.side === 1 ? m.p1 : m.p2)} ${(awardOf(e.type) || { label: e.type }).label} +${e.pts}`)
       .join("; ");
+    // Score A and B stay the points across the whole match; the set column
+    // carries what actually decided it, so neither reading is lost.
+    const sets = (m.sets || []).map((x) => `${x.s1}-${x.s2}`).join(" ");
     out.push(csvRow([
       stageLabel(stageOf(m, t)), groupName(m.groupId),
       m.p1 ? nameOf(m.p1) : "", m.p2 ? nameOf(m.p2) : "",
       m.done ? s1 : "", m.done ? s2 : "",
+      sets,
       w ? nameOf(w) : (m.done ? "draw" : "not played"),
       seq,
     ]));
@@ -929,10 +1009,16 @@ function scoredCount(t) {
 }
 
 /* ================================================================== */
-/*  App                                                                */
+/*  The board — one tournament                                         */
 /* ================================================================== */
 
-export default function App() {
+/**
+ * @param eventId  which tournament to read and write
+ * @param canEdit  whether to offer the controls. The database decides what is
+ *                 actually permitted; this only decides what is shown.
+ * @param onExit   back to the list, when there is a list to go back to
+ */
+function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [t, setT] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState(initialTab);
@@ -940,16 +1026,20 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
-  const [role, setRole] = useState("spectator");
-  const [showGate, setShowGate] = useState(false);
   const [live, setLive] = useState(false);
   const [slide, setSlide] = useState(null); // direction of the last tab change
   const [group, setGroup] = useState(initialGroup);
-  const isAdmin = role === "admin";
+  const isAdmin = canEdit;
+  const store = useMemo(() => storeFor(eventId), [eventId]);
 
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
   }, [tab]);
+
+  // The remembered tab may not exist in this format — a league has no bracket.
+  useEffect(() => {
+    if (t && !tabsFor(t).includes(tab)) setTab(tabsFor(t)[0]);
+  }, [t, tab]);
 
   useEffect(() => {
     try { localStorage.setItem(GROUP_KEY, group); } catch (e) { /* private mode */ }
@@ -977,26 +1067,22 @@ export default function App() {
   };
 
   useEffect(() => {
+    let live = true;
+    setLoaded(false);
     (async () => {
       const row = await store.loadRow();
+      if (!live) return;                 // the tournament changed under us
       if (row) {
         lastStamp.current = row.updated_at;
         lastJson.current = JSON.stringify(row.data);
         setT(row.data);
+      } else {
+        setT(null);
       }
       setLoaded(true);
     })();
-
-    // Supabase's own session is the source of truth for admin access —
-    // not anything held in this browser's state.
-    supabase.auth.getSession().then(({ data }) => {
-      setRole(data.session ? "admin" : "spectator");
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setRole(session ? "admin" : "spectator");
-    });
-    return () => sub.subscription.unsubscribe();
-  }, []);
+    return () => { live = false; };
+  }, [store]);
 
   // Every device follows the board, admin phones included — scoring on the PC
   // has to show up on the phone in your pocket. Only this device's own save is
@@ -1006,7 +1092,7 @@ export default function App() {
       (incoming, stamp) => applyIncoming(incoming, stamp),
       (status) => setLive(status === "SUBSCRIBED")
     );
-  }, []);
+  }, [store]);
 
   // The safety net, and it runs even when realtime claims to be connected:
   // a connected socket is not proof that row changes are being delivered.
@@ -1028,7 +1114,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", tick);
       window.removeEventListener("focus", tick);
     };
-  }, [loaded]);
+  }, [loaded, store]);
 
   useEffect(() => {
     if (!loaded || !t || !isAdmin) return;
@@ -1041,7 +1127,7 @@ export default function App() {
       // rather than sitting on a change the server never took.
       else lastJson.current = null;
     });
-  }, [t, loaded, isAdmin]);
+  }, [t, loaded, isAdmin, store]);
 
   const nameOf = useMemo(() => {
     const map = {};
@@ -1087,8 +1173,9 @@ export default function App() {
     if (Math.abs(dx) < SWIPE_MIN_X) return;
     if (Math.abs(dx) < Math.abs(dy) * SWIPE_X_OVER_Y) return; // a scroll, not a swipe
 
-    const next = TABS.indexOf(tab) + (dx < 0 ? 1 : -1);
-    if (next >= 0 && next < TABS.length) goTab(TABS[next]); // no wrap-around
+    const list = tabsFor(t);
+    const next = list.indexOf(tab) + (dx < 0 ? 1 : -1);
+    if (next >= 0 && next < list.length) goTab(list[next]); // no wrap-around
   };
 
   if (!loaded) {
@@ -1099,18 +1186,16 @@ export default function App() {
     );
   }
 
+  // A tournament always exists by the time the board opens — it is created from
+  // the list, not from in here. An empty one means the row was deleted while
+  // somebody was looking at it.
   if (!t) {
-    if (!isAdmin) {
-      return (
-        <>
-          <Style />
-          <NotLive onUnlock={() => setShowGate(true)} />
-          {showGate && <AdminGate onClose={() => setShowGate(false)}
-            onPass={() => setShowGate(false)} />}
-        </>
-      );
-    }
-    return <><Style /><Setup onCreate={(v) => { setT(v); setTab("groups"); }} /></>;
+    return (
+      <>
+        <Style />
+        <NotLive onUnlock={onExit} />
+      </>
+    );
   }
 
   const allMatches = [
@@ -1121,17 +1206,23 @@ export default function App() {
 
   const update = (fn) => setT((prev) => fn(structuredClone(prev)));
 
-  const saveScore = (kind, id, events, done) => {
+  /*
+   * The sets are stored beside the finishes because propagate() and every
+   * table read the winner without ever seeing the tournament, and so have no
+   * target to replay the finishes against.
+   */
+  const saveScore = (kind, id, events, done, sets) => {
+    const put = (m) => { m.events = events; m.done = done; m.sets = sets && sets.length > 1 ? sets : null; };
     update((d) => {
       if (kind === "group") {
         const m = d.groupMatches.find((x) => x.id === id);
-        if (m) { m.events = events; m.done = done; }
+        if (m) put(m);
       } else {
         if (d.bracket.third && d.bracket.third.id === id) {
-          d.bracket.third.events = events; d.bracket.third.done = done;
+          put(d.bracket.third);
         } else {
           d.bracket.rounds.forEach((r) => r.forEach((m) => {
-            if (m.id === id) { m.events = events; m.done = done; }
+            if (m.id === id) put(m);
           }));
         }
         d.bracket = propagate(d.bracket);
@@ -1176,20 +1267,18 @@ export default function App() {
             <span>{t.players.length} bladers · {t.groups.length} group{t.groups.length > 1 ? "s" : ""} · top {t.advance} advance</span>
           </div>
         </div>
-        <button
-          onClick={() => (isAdmin ? supabase.auth.signOut() : setShowGate(true))}
-          aria-label={isAdmin ? "Leave admin mode" : "Enter admin mode"}
-          className="bx-d"
-          style={{
-            background: isAdmin ? `${C.magenta}1F` : "transparent",
-            border: `1px solid ${isAdmin ? C.magenta : C.line}`,
-            color: isAdmin ? C.magenta : C.muted, cursor: "pointer",
-            padding: "6px 9px", borderRadius: 3, fontSize: 13, fontWeight: 700,
-            display: "flex", alignItems: "center", gap: 5,
-          }}>
-          {isAdmin ? <Unlock size={14} /> : <Lock size={14} />}
-          <span className="bx-role-label">{isAdmin ? "Admin" : "View"}</span>
-        </button>
+        {onExit && (
+          <button onClick={onExit} aria-label="All tournaments" className="bx-d"
+            style={{
+              background: "transparent", border: `1px solid ${C.line}`,
+              color: C.muted, cursor: "pointer",
+              padding: "6px 9px", borderRadius: 3, fontSize: 13, fontWeight: 700,
+              display: "flex", alignItems: "center", gap: 5,
+            }}>
+            <ArrowLeft size={14} />
+            <span className="bx-role-label">All</span>
+          </button>
+        )}
         {isAdmin && (
           <button onClick={() => setShowSetup(true)} aria-label="Tournament settings"
             style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 6 }}>
@@ -1225,16 +1314,16 @@ export default function App() {
       <nav style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 20,
         background: C.surface, borderTop: `1px solid ${C.line}`,
-        display: "grid", gridTemplateColumns: "repeat(5,1fr)",
+        display: "grid", gridTemplateColumns: `repeat(${tabsFor(t).length},1fr)`,
         paddingBottom: "env(safe-area-inset-bottom)",
       }}>
         {[
           ["groups", Users, "Groups"],
           ["matches", Swords, "Matches"],
-          ["table", Table2, "Table"],
+          ["table", Table2, isLeague(t) ? "League" : "Table"],
           ["bracket", GitBranch, "Bracket"],
-          ["players", Trophy, "Bladers"],
-        ].map(([k, Icon, label]) => {
+          ["players", Trophy, manyWord(t)],
+        ].filter(([k]) => tabsFor(t).includes(k)).map(([k, Icon, label]) => {
           const on = tab === k;
           return (
             <button key={k} onClick={() => goTab(k)}
@@ -1258,7 +1347,7 @@ export default function App() {
         <ScoreSheet
           match={scoringMatch} t={t} nameOf={nameOf}
           onClose={() => setScoring(null)}
-          onSave={(events, done) => { saveScore(scoring.kind, scoring.id, events, done); setScoring(null); }}
+          onSave={(events, done, sets) => { saveScore(scoring.kind, scoring.id, events, done, sets); setScoring(null); }}
         />
       )}
       {detail && (
@@ -1267,13 +1356,12 @@ export default function App() {
       )}
       {showSetup && isAdmin && (
         <SettingsSheet t={t} update={update} onClose={() => setShowSetup(false)}
-          onReset={() => { setT(null); setShowSetup(false); }} />
+          onReferees={isOwner ? onReferees : null}
+          canDelete={isOwner}
+          onReset={() => { setShowSetup(false); if (onDelete) onDelete(); }} />
       )}
       {showFinal && isAdmin && (
         <FinalStandingsSheet t={t} onClose={() => setShowFinal(false)} />
-      )}
-      {showGate && (
-        <AdminGate onClose={() => setShowGate(false)} onPass={() => setShowGate(false)} />
       )}
     </div>
   );
@@ -1345,29 +1433,54 @@ function ImagePicker({ value, onChange, kind = "bg" }) {
 /*  Stage points editor                                                */
 /* ================================================================== */
 
-function StagePoints({ koSize, thirdPlace, points, onChange }) {
+function StagePoints({ koSize, thirdPlace, points, onChange, bestOf, onBestOf }) {
   const stages = stagesFor(koSize, thirdPlace);
+  const of = (key) => Math.max(1, (bestOf && bestOf[key]) || 1);
+
   return (
     <div style={{ display: "grid", gap: 10 }}>
-      {stages.map((s, i) => (
-        <div key={s.key} style={{
-          background: C.base, border: `1px solid ${C.line}`, borderRadius: 3, padding: "11px 12px",
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
-            <Blade color={GROUP_COLORS[i % GROUP_COLORS.length]} h={15} />
-            <span className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{s.label}</span>
-            <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
-              first to {points[s.key]}
-            </span>
+      {stages.map((s, i) => {
+        const tone = GROUP_COLORS[i % GROUP_COLORS.length];
+        const n = of(s.key);
+        return (
+          <div key={s.key} style={{
+            background: C.base, border: `1px solid ${C.line}`, borderRadius: 3, padding: "11px 12px",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+              <Blade color={tone} h={15} />
+              <span className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{s.label}</span>
+              <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
+                {n > 1
+                  ? `${n} sets of ${points[s.key]}, first to ${setsToWin(n)}`
+                  : `first to ${points[s.key]}`}
+              </span>
+            </div>
+            <Segmented
+              value={points[s.key]}
+              onChange={(v) => onChange({ ...points, [s.key]: v })}
+              options={[3, 4, 5, 7, 9].map((x) => ({ value: x, label: String(x) }))}
+              tone={tone}
+            />
+            {onBestOf && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 5 }}>
+                  Played over
+                </div>
+                <Segmented
+                  value={n}
+                  onChange={(v) => onBestOf({ ...(bestOf || {}), [s.key]: v })}
+                  options={[
+                    { value: 1, label: "One set" },
+                    { value: 3, label: "Best of 3" },
+                    { value: 5, label: "Best of 5" },
+                  ]}
+                  tone={tone}
+                />
+              </div>
+            )}
           </div>
-          <Segmented
-            value={points[s.key]}
-            onChange={(v) => onChange({ ...points, [s.key]: v })}
-            options={[3, 4, 5, 7, 9].map((n) => ({ value: n, label: String(n) }))}
-            tone={GROUP_COLORS[i % GROUP_COLORS.length]}
-          />
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1378,6 +1491,7 @@ function StagePoints({ koSize, thirdPlace, points, onChange }) {
 
 function Setup({ onCreate }) {
   const [name, setName] = useState("");
+  const [format, setFormat] = useState("knockout");
   const [bulk, setBulk] = useState("");
   const [players, setPlayers] = useState([]);
   const [entry, setEntry] = useState("");
@@ -1386,24 +1500,44 @@ function Setup({ onCreate }) {
   const [koSize, setKoSize] = useState(8);
   const [third, setThird] = useState(true);
   const [points, setPoints] = useState(defaultPoints());
+  const [leaguePoints, setLeaguePoints] = useState(defaultLeaguePoints());
+  const [bestOf, setBestOf] = useState(defaultBestOf());
+  const [selfKO, setSelfKO] = useState(defaultSelfKO());
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
+  /*
+   * One line becomes one competitor. In a tag tournament "Ronin: Ayo, Bex"
+   * carries its members along, but it stays a single entrant everywhere else —
+   * the draw, the bracket and the scoring never learn the difference.
+   */
+  const parseEntry = (line) => {
+    const [head, tail] = String(line).split(/:(.+)/);
+    // A colon with nothing after it does not split, so it would otherwise stay
+    // stuck to the name and the team would be called "Ronin:".
+    const nm = (head || "").trim().replace(/:+$/, "").trim();
+    if (!nm) return null;
+    const members = (tail || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return members.length ? { id: uid(), name: nm, members } : { id: uid(), name: nm };
+  };
+
   const addPlayer = () => {
-    const n = entry.trim();
-    if (!n) return;
-    setPlayers((p) => [...p, { id: uid(), name: n }]);
+    const one = parseEntry(entry);
+    if (!one) return;
+    setPlayers((p) => [...p, one]);
     setEntry("");
   };
   const addBulk = () => {
-    const names = bulk.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-    if (!names.length) return;
-    setPlayers((p) => [...p, ...names.map((n) => ({ id: uid(), name: n }))]);
+    // Commas separate members, so a pasted list splits on line breaks alone.
+    const rows = bulk.split(/\n/).map(parseEntry).filter(Boolean);
+    if (!rows.length) return;
+    setPlayers((p) => [...p, ...rows]);
     setBulk("");
   };
 
+  const league = format === "league";
   const qualifiers = numGroups * advance;
-  const tooMany = koSize > 0 && qualifiers > koSize;
+  const tooMany = !league && koSize > 0 && qualifiers > koSize;
   const byes = koSize > 0 ? Math.max(0, koSize - qualifiers) : 0;
 
   /* The smallest knockout that would hold this many qualifiers, offered as a
@@ -1414,21 +1548,39 @@ function Setup({ onCreate }) {
    * Why the button is disabled, in the order worth fixing. A greyed-out
    * button with the reason somewhere further up the page reads as broken.
    */
+  const least = league ? 2 : numGroups * 2;   // a league needs only an opponent
   const blocker = !name.trim()
     ? "Give the tournament a name first."
-    : players.length < numGroups * 2
-      ? `${numGroups} groups need at least ${numGroups * 2} bladers, and there ${players.length === 1 ? "is" : "are"} ${players.length}.`
+    : players.length < least
+      ? league
+        ? `A league needs at least two ${format === "tag" ? "teams" : "bladers"}, and there ${players.length === 1 ? "is 1" : "are " + players.length}.`
+        : `${numGroups} groups need at least ${least} bladers, and there ${players.length === 1 ? "is" : "are"} ${players.length}.`
       : tooMany
         ? `${numGroups} groups × ${advance} advancing makes ${qualifiers} qualifiers, and the knockout only has ${koSize} places.`
         : null;
   const ready = !blocker;
 
   const create = () => {
+    /*
+     * A league is one group holding everyone, so its fixtures exist the moment
+     * it is created — there is no draw to make. Everything downstream then
+     * treats it as the group stage of a tournament that has no knockout.
+     */
+    if (league) {
+      const table = [{ id: "g0", name: "League", playerIds: players.map((p) => p.id) }];
+      onCreate({
+        name: name.trim(), format, players, groups: table, points, bestOf: defaultBestOf(), selfKO,
+        leaguePoints, advance: 1, koSize: 0, thirdPlace: false,
+        groupMatches: buildGroupMatches(table), bracket: null, bgUrl, logoUrl,
+      });
+      return;
+    }
+
     const groups = Array.from({ length: numGroups }, (_, i) => ({
       id: "g" + i, name: "Group " + GROUP_LETTERS[i], playerIds: [],
     }));
     onCreate({
-      name: name.trim(), players, groups, points, advance,
+      name: name.trim(), format, players, groups, points, bestOf, selfKO, advance,
       koSize, thirdPlace: third, groupMatches: [], bracket: null, bgUrl, logoUrl,
     });
   };
@@ -1459,7 +1611,33 @@ function Setup({ onCreate }) {
 
         <Field label="Tournament name">
           <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="Xtreme Clash S2" />
+            placeholder="Enter name" />
+        </Field>
+
+        <Field label="Self-KO"
+          hint="A bey that goes out on its own hands the point to the other side. Turn it off to score only the finishes above it.">
+          <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, cursor: "pointer" }}>
+            <input type="checkbox" checked={selfKO.enabled}
+              onChange={(e) => setSelfKO((v) => ({ ...v, enabled: e.target.checked }))}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Count a self-KO</span>
+          </label>
+          {selfKO.enabled && (
+            <Segmented value={selfKO.pts}
+              onChange={(v) => setSelfKO((x) => ({ ...x, pts: v }))}
+              options={[{ value: 1, label: "Worth 1" }, { value: 2, label: "Worth 2" }]} />
+          )}
+        </Field>
+
+        <Field label="Format"
+          hint={format === "league"
+            ? "Everyone plays everyone once, ranked on league points. No groups to draw and no knockout."
+            : "A tag team is one competitor with a name and members — it draws, plays and scores exactly as a single blader does."}>
+          <Segmented value={format} onChange={setFormat} options={[
+            { value: "knockout", label: "Groups & knockout" },
+            { value: "tag", label: "Tag team" },
+            { value: "league", label: "League" },
+          ]} />
         </Field>
 
         <Field label="Organiser logo (optional)"
@@ -1472,10 +1650,11 @@ function Setup({ onCreate }) {
           <ImagePicker kind="bg" value={bgUrl} onChange={setBgUrl} />
         </Field>
 
-        <Field label={`Bladers (${players.length})`}>
+        <Field label={`${format === "tag" ? "Teams" : "Bladers"} (${players.length})`}>
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} value={entry} onChange={(e) => setEntry(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="Add a name" />
+              onKeyDown={(e) => e.key === "Enter" && addPlayer()}
+              placeholder={format === "tag" ? "Ronin: Ayo, Bex" : "Add a name"} />
             <Btn onClick={addPlayer} tone="primary" style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
           </div>
           {players.length > 0 && (
@@ -1485,7 +1664,12 @@ function Setup({ onCreate }) {
                   display: "inline-flex", alignItems: "center", gap: 6, background: C.surface,
                   border: `1px solid ${C.line}`, borderRadius: 3, padding: "6px 9px", fontSize: 14,
                 }}>
-                  {p.name}
+                  <span>
+                    {p.name}
+                    {p.members && (
+                      <span style={{ color: C.muted, fontSize: 12 }}> · {p.members.join(", ")}</span>
+                    )}
+                  </span>
                   <button onClick={() => setPlayers((v) => v.filter((x) => x.id !== p.id))}
                     aria-label={`Remove ${p.name}`}
                     style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 0, display: "flex" }}>
@@ -1497,16 +1681,39 @@ function Setup({ onCreate }) {
           )}
           <textarea style={{ ...inputStyle, marginTop: 10, minHeight: 66, resize: "vertical" }}
             value={bulk} onChange={(e) => setBulk(e.target.value)}
-            placeholder="Or paste a list — one name per line" />
+            placeholder={format === "tag"
+              ? "Or paste a list — one team per line, as Name: member, member"
+              : "Or paste a list — one name per line"} />
           {bulk.trim() && <Btn onClick={addBulk} style={{ marginTop: 6 }}>Add pasted names</Btn>}
         </Field>
 
+        {format === "league" ? (
+          <>
+            <Block title="League points"
+              hint="A match run to a target rarely ends level, but a draw is counted rather than quietly scoring nothing.">
+              <div style={{ display: "flex", gap: 10 }}>
+                <NumField label="For a win" value={leaguePoints.win}
+                  onChange={(v) => setLeaguePoints((l) => ({ ...l, win: v }))} />
+                <NumField label="For a draw" value={leaguePoints.draw}
+                  onChange={(v) => setLeaguePoints((l) => ({ ...l, draw: v }))} />
+              </div>
+            </Block>
+
+            <Field label="Points to win a match"
+              hint="Every fixture runs to this target. A finish that would overshoot is capped.">
+              <Segmented value={points.group}
+                onChange={(v) => setPoints((p) => ({ ...p, group: v }))}
+                options={[3, 4, 5, 7, 9].map((n) => ({ value: n, label: String(n) }))} />
+            </Field>
+          </>
+        ) : (
+          <>
         <Field label="Number of groups">
           <Segmented value={numGroups} onChange={setNumGroups}
             options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: n, label: String(n) }))} />
         </Field>
 
-        <Field label="Bladers advancing from each group">
+        <Field label={`${format === "tag" ? "Teams" : "Bladers"} advancing from each group`}>
           <Segmented value={advance} onChange={setAdvance}
             options={[1, 2, 3, 4].map((n) => ({ value: n, label: String(n) }))} />
         </Field>
@@ -1544,8 +1751,11 @@ function Setup({ onCreate }) {
 
         <Field label="Points to win a match"
           hint="Each stage runs on its own target. A finish that would overshoot is capped — on a first-to-4 match, an Xtreme at 2–1 finishes it 4–1, not 5–1.">
-          <StagePoints koSize={koSize} thirdPlace={third} points={points} onChange={setPoints} />
+          <StagePoints koSize={koSize} thirdPlace={third} points={points} onChange={setPoints}
+            bestOf={bestOf} onBestOf={setBestOf} />
         </Field>
+          </>
+        )}
 
         <Btn onClick={create} tone="primary" disabled={!ready}
           style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 18, marginTop: 8 }}>
@@ -1794,7 +2004,12 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
             ) : (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {g.playerIds.map((id) => (
-                  <Chip key={id} onClick={isAdmin ? () => setMoving(id) : undefined} active={moving === id}>{nameOf(id)}</Chip>
+                  <Chip key={id} onClick={isAdmin ? () => setMoving(id) : undefined} active={moving === id}>
+                    {nameOf(id)}
+                    {membersOf(t, id) && (
+                      <span style={{ color: C.muted, fontSize: 11.5 }}> · {membersOf(t, id).join(", ")}</span>
+                    )}
+                  </Chip>
                 ))}
               </div>
             )}
@@ -1827,8 +2042,11 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
   }
   return (
     <div>
-      <SectionHead title="Group matches"
-        sub={`Everyone plays everyone in their group, first to ${t.points.group}.` + (isAdmin ? " Tap a match to score it." : "")} />
+      <SectionHead title={isLeague(t) ? "Fixtures" : "Group matches"}
+        sub={(isLeague(t)
+          ? `Everyone plays everyone once, first to ${t.points.group}.`
+          : `Everyone plays everyone in their group, first to ${t.points.group}.`)
+          + (isAdmin ? " Tap a match to score it." : "")} />
       <GroupPicker t={t} value={group} onChange={setGroup} />
       {/* Indexed over every group, not the filtered set, so each keeps its colour. */}
       {t.groups.map((g, gi) => {
@@ -1878,7 +2096,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
       <span className="bx-d" style={{
         fontSize: 19, fontWeight: 800, flexShrink: 0,
         color: m.done ? C.ink : C.muted, minWidth: 50, textAlign: "center",
-      }}>{m.done ? `${s1}–${s2}` : "vs"}</span>
+      }}>{m.done ? (m.sets && m.sets.length ? `${setWins(m).w1}–${setWins(m).w2}` : `${s1}–${s2}`) : "vs"}</span>
       <span style={{
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
         whiteSpace: "nowrap", textAlign: "right", fontWeight: w === m.p2 ? 700 : 400,
@@ -1911,7 +2129,8 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
         .filter((m) => (m.events || []).length > 0).length
     : 0;
 
-  const kings = allPlayed ? swissKings(t) : [];
+  // A league has no group stage to be king of; its table already says who won.
+  const kings = allPlayed && !isLeague(t) ? swissKings(t) : [];
 
   // The trophy is lifted, or there was never a knockout to lift one in.
   const champion = t.bracket
@@ -1925,8 +2144,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
 
   return (
     <div>
-      <SectionHead title="Standings" color={C.cyan}
-        sub="Ranked by wins, then by total margin across won matches only. Tap a name for that blader's record." />
+      <SectionHead title={isLeague(t) ? "League table" : "Standings"} color={C.cyan}
+        sub={isLeague(t)
+          ? `${num(t.leaguePoints && t.leaguePoints.win)} for a win, ${num(t.leaguePoints && t.leaguePoints.draw)} for a draw, then winning margin. Tap a name for that ${oneWord(t)}'s record.`
+          : `Ranked by wins, then by total margin across won matches only. Tap a name for that ${oneWord(t)}'s record.`} />
 
       {kings.length > 0 && (
         <div style={{
@@ -1955,7 +2176,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
       {t.groups.map((g, gi) => {
         if (group !== ALL_GROUPS && g.id !== group) return null;
         const ms = t.groupMatches.filter((m) => m.groupId === g.id);
-        const rows = computeStandings(g.playerIds, ms, nameOf);
+        const rows = computeStandings(g.playerIds, ms, nameOf, isLeague(t) ? t.leaguePoints : null);
         const col = GROUP_COLORS[gi % GROUP_COLORS.length];
         return (
           <div key={g.id} style={{ ...card, marginBottom: 14, padding: 0, overflow: "hidden", borderLeft: `4px solid ${col}` }}>
@@ -1966,7 +2187,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                 <thead>
                   <tr style={{ color: C.muted, fontSize: 12 }}>
-                    {["", "Blader", "P", "W", "L", "Margin", "+/−"].map((h, i) => (
+                    {(isLeague(t)
+                      ? ["", manyWord(t).replace(/s$/, ""), "P", "W", "L", "Pts", "Margin"]
+                      : ["", manyWord(t).replace(/s$/, ""), "P", "W", "L", "Margin", "+/−"]
+                    ).map((h, i) => (
                       <th key={i} style={{
                         textAlign: i === 1 ? "left" : i === 0 ? "center" : "right",
                         padding: "7px 10px", fontWeight: 600,
@@ -1977,7 +2201,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
                 </thead>
                 <tbody>
                   {rows.map((r, i) => {
-                    const q = i < t.advance;
+                    const q = isLeague(t) ? i === 0 : i < t.advance;
                     return (
                       <tr key={r.id} onClick={() => onPlayer(r.id)} style={{ cursor: "pointer" }}>
                         <td style={{ ...td, textAlign: "center", color: q ? C.gold : C.muted, fontWeight: 800, width: 26 }}>{i + 1}</td>
@@ -1985,8 +2209,17 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
                         <td style={td}>{r.played}</td>
                         <td style={{ ...td, fontWeight: 700 }}>{r.wins}</td>
                         <td style={td}>{r.losses}</td>
-                        <td style={{ ...td, color: C.cyan, fontWeight: 700 }}>{r.winMargin}</td>
-                        <td style={{ ...td, color: C.muted }}>{r.pf - r.pa > 0 ? "+" : ""}{r.pf - r.pa}</td>
+                        {isLeague(t) ? (
+                          <>
+                            <td style={{ ...td, color: C.cyan, fontWeight: 800 }}>{r.pts}</td>
+                            <td style={{ ...td, color: C.muted }}>{r.winMargin}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td style={{ ...td, color: C.cyan, fontWeight: 700 }}>{r.winMargin}</td>
+                            <td style={{ ...td, color: C.muted }}>{r.pf - r.pa > 0 ? "+" : ""}{r.pf - r.pa}</td>
+                          </>
+                        )}
                       </tr>
                     );
                   })}
@@ -2153,9 +2386,21 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const [askReset, setAskReset] = useState(false);
   const [askLeave, setAskLeave] = useState(false);
   const [askUndo, setAskUndo] = useState(false);
-  const s1 = events.filter((e) => e.side === 1).reduce((a, e) => a + e.pts, 0);
-  const s2 = events.filter((e) => e.side === 2).reduce((a, e) => a + e.pts, 0);
-  const over = s1 >= target || s2 >= target;
+  /*
+   * Sets are replayed from the finish log rather than tracked alongside it, so
+   * undo stays "drop the last finish" and there is no second piece of state to
+   * fall out of step. A best of 1 is the same code path with one set.
+   */
+  const bestOf = bestOfFor(match, t);
+  const selfKO = selfKOFor(t);
+  const run = splitSets(events, target, bestOf);
+  const over = run.decided;
+
+  // The big numbers are the set being played — or the last one, once the match
+  // is over, since the set in progress resets to nothing the moment it closes.
+  const shown = over && run.sets.length ? run.sets[run.sets.length - 1] : run.current;
+  const s1 = shown.s1;
+  const s2 = shown.s2;
 
   // Nothing here is written until Save, so every way out of this sheet throws
   // away whatever has been tapped in. Ask first — the swipe especially is easy
@@ -2174,12 +2419,24 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
    */
   const tryUndo = () => (match.done && !dirty ? setAskUndo(true) : undo());
 
+  /*
+   * The cap is worked out inside the updater, against the events as they are
+   * at that moment. Taken from the rendered score instead, two taps landing in
+   * the same frame both read the score before either of them counted, and a
+   * first-to-7 set could finish 9-0.
+   *
+   * Capped against the set in progress, not the match: each set runs to the
+   * target on its own.
+   */
   const add = (side, f) => {
-    if (over) return;
-    const cur = side === 1 ? s1 : s2;
-    const pts = Math.min(f.pts, target - cur); // cap at the stage target
-    if (pts <= 0) return;
-    setEvents((v) => [...v, { side, type: f.key, pts, raw: f.pts }]);
+    setEvents((prev) => {
+      const now = splitSets(prev, target, bestOf);
+      if (now.decided) return prev;
+      const cur = side === 1 ? now.current.s1 : now.current.s2;
+      const pts = Math.min(f.pts, target - cur);
+      if (pts <= 0) return prev;
+      return [...prev, { side, type: f.key, pts, raw: f.pts }];
+    });
   };
 
   const Side = ({ side, color }) => {
@@ -2217,11 +2474,19 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
           {FINISHES.map((f) => awardBtn(f))}
         </div>
-        {/* Set apart from the finishes — the point comes from the opponent's foul. */}
-        {awardBtn(PENALTY, {
-          marginTop: 6, background: "transparent",
-          borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
-        })}
+        {/* Set apart from the finishes: these are points the other side gave
+            away, not points won on the beystadium. */}
+        <div style={{
+          display: "grid", gap: 6, marginTop: 6,
+          gridTemplateColumns: selfKO.enabled ? "1fr 1fr" : "1fr",
+        }}>
+          {awardBtn(PENALTY, {
+            background: "transparent", borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
+          })}
+          {selfKO.enabled && awardBtn({ ...SELF, pts: selfKO.pts }, {
+            background: "transparent", borderStyle: "dashed", fontSize: 14, padding: "10px 4px",
+          })}
+        </div>
       </div>
     );
   };
@@ -2239,8 +2504,15 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <ArrowLeft size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.05 }}>First to {target}</div>
-          <div style={{ fontSize: 11.5, color: C.muted }}>{stageLabel}</div>
+          <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.05 }}>
+            {bestOf > 1
+              ? `Set ${Math.min(run.sets.length + (over ? 0 : 1), bestOf)} · first to ${target}`
+              : `First to ${target}`}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.muted }}>
+            {stageLabel}
+            {bestOf > 1 && ` · best of ${bestOf}, sets ${run.w1}–${run.w2}`}
+          </div>
         </div>
         <Btn onClick={() => (events.length ? setAskReset(true) : null)} tone="ghost"
           disabled={!events.length} style={{ padding: "7px 11px" }}>Reset</Btn>
@@ -2310,6 +2582,27 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
           <Side side={2} color={C.cyan} />
         </div>
 
+        {bestOf > 1 && run.sets.length > 0 && (
+          <div style={{
+            marginTop: 14, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center",
+          }}>
+            <span style={{ fontSize: 12.5, color: C.muted }}>Sets</span>
+            {run.sets.map((st, i) => (
+              <span key={i} className="bx-d" style={{
+                fontSize: 13.5, fontWeight: 700, padding: "4px 9px", borderRadius: 3,
+                border: `1px solid ${st.s1 > st.s2 ? C.magenta : C.cyan}55`,
+                background: `${st.s1 > st.s2 ? C.magenta : C.cyan}14`,
+                color: st.s1 > st.s2 ? C.magenta : C.cyan,
+              }}>{st.s1}–{st.s2}</span>
+            ))}
+            {!over && (
+              <span style={{ fontSize: 12.5, color: C.muted }}>
+                first to {run.need} set{run.need > 1 ? "s" : ""} takes it
+              </span>
+            )}
+          </div>
+        )}
+
         {over && (
           <div style={{
             marginTop: 14, padding: "13px 14px", borderRadius: 4,
@@ -2317,7 +2610,12 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
             fontSize: 14.5, display: "flex", alignItems: "center", gap: 9,
           }}>
             <Check size={17} color={C.green} />
-            <span><strong>{nameOf(s1 > s2 ? match.p1 : match.p2)}</strong> takes it {Math.max(s1, s2)}–{Math.min(s1, s2)}</span>
+            <span>
+              <strong>{nameOf(run.w1 > run.w2 ? match.p1 : match.p2)}</strong> takes it{" "}
+              {bestOf > 1
+                ? `${Math.max(run.w1, run.w2)}–${Math.min(run.w1, run.w2)} in sets`
+                : `${Math.max(s1, s2)}–${Math.min(s1, s2)}`}
+            </span>
           </div>
         )}
 
@@ -2344,12 +2642,14 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <Btn onClick={tryClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 14 }}>Cancel</Btn>
-          <Btn onClick={() => onSave(events, over)} tone="primary" disabled={!over}
+          <Btn onClick={() => onSave(events, over, run.sets)} tone="primary" disabled={!over}
             style={{ flex: 2, justifyContent: "center", padding: 14, fontSize: 17 }}>Save result</Btn>
         </div>
         {!over && (
           <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, textAlign: "center" }}>
-            Save unlocks when a blader reaches {target}.
+            {bestOf > 1
+              ? `Save unlocks when someone takes ${run.need} set${run.need > 1 ? "s" : ""}.`
+              : `Save unlocks when a ${oneWord(t)} reaches ${target}.`}
           </div>
         )}
       </div>
@@ -2400,8 +2700,8 @@ function PlayersView({ t, nameOf, allMatches, onPlayer }) {
 
   return (
     <div>
-      <SectionHead title="Bladers" color={C.green}
-        sub="Every match a blader has played, group stage and knockout together. Tap for the full record." />
+      <SectionHead title={manyWord(t)} color={C.green}
+        sub={`Every match a ${oneWord(t)} has played, group stage and knockout together. Tap for the full record.`} />
       {rows.map(({ p, st }) => (
         <button key={p.id} onClick={() => onPlayer(p.id)} style={{
           width: "100%", display: "flex", alignItems: "center", gap: 12,
@@ -2453,6 +2753,11 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="bx-d" style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.05 }}>{nameOf(playerId)}</div>
           {group && <div style={{ fontSize: 12, color: col }}>{group.name}</div>}
+          {membersOf(t, playerId) && (
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>
+              {membersOf(t, playerId).join(" · ")}
+            </div>
+          )}
         </div>
       </div>
 
@@ -2719,10 +3024,11 @@ function FinalStandingsSheet({ t, onClose }) {
   );
 }
 
-function SettingsSheet({ t, update, onClose, onReset }) {
+function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
   const [confirm, setConfirm] = useState(false);
   const [askClear, setAskClear] = useState(false);
   const scored = scoredCount(t);
+  const selfKO = selfKOFor(t);
 
   /* Scores go, the shape of the tournament stays. The bracket goes too: it was
      seeded from standings that no longer exist, so it would be a fiction. */
@@ -2768,10 +3074,28 @@ function SettingsSheet({ t, update, onClose, onReset }) {
             onChange={(url) => update((d) => { d.bgUrl = url; return d; })} />
         </Field>
 
+        <Field label="Self-KO"
+          hint="Applies to matches scored from now on. Results already saved keep whatever they recorded.">
+          <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, cursor: "pointer" }}>
+            <input type="checkbox" checked={selfKO.enabled}
+              onChange={(e) => update((d) => {
+                d.selfKO = { ...selfKOFor(d), enabled: e.target.checked }; return d;
+              })}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Count a self-KO</span>
+          </label>
+          {selfKO.enabled && (
+            <Segmented value={selfKO.pts}
+              onChange={(v) => update((d) => { d.selfKO = { ...selfKOFor(d), pts: v }; return d; })}
+              options={[{ value: 1, label: "Worth 1" }, { value: 2, label: "Worth 2" }]} />
+          )}
+        </Field>
+
         <Field label="Points to win a match"
           hint="Changing a stage target applies to matches scored from now on. Results already saved keep their scores.">
           <StagePoints koSize={t.koSize} thirdPlace={t.thirdPlace} points={t.points}
-            onChange={(p) => update((d) => { d.points = p; return d; })} />
+            onChange={(p) => update((d) => { d.points = p; return d; })}
+            bestOf={t.bestOf} onBestOf={(b) => update((d) => { d.bestOf = b; return d; })} />
         </Field>
 
         <Field label="Bladers advancing from each group">
@@ -2807,10 +3131,22 @@ function SettingsSheet({ t, update, onClose, onReset }) {
           </Btn>
         </div>
 
+        {onReferees && (
+          <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+            <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Referees</div>
+            <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
+              Someone you trust to run this tournament — scores, draws and the bracket.
+              They cannot rename it, delete it, or take it over.
+            </div>
+            <Btn onClick={onReferees}><Users size={15} />Manage referees</Btn>
+          </div>
+        )}
+
+        {canDelete && (
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Start over</div>
           <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
-            Deletes this tournament and everything in it, then takes you back to setup.
+            Deletes this tournament and everything in it, and returns you to your list.
           </div>
           {confirm ? (
             <div style={{ display: "flex", gap: 8 }}>
@@ -2821,6 +3157,7 @@ function SettingsSheet({ t, update, onClose, onReset }) {
             <Btn onClick={() => setConfirm(true)} tone="danger"><Trash2 size={15} />Delete tournament</Btn>
           )}
         </div>
+        )}
       </div>
 
       {askClear && (
@@ -2840,71 +3177,90 @@ function SettingsSheet({ t, update, onClose, onReset }) {
 /* ================================================================== */
 
 /**
- * Real sign-in against Supabase auth. Success here only unlocks the admin
- * UI locally — the "tournaments" table's row-level security policies are
- * what actually reject writes from anyone without a valid session.
+ * Signing in, and signing up. Registering on its own grants nothing: the
+ * account exists, unapproved, and can be added as a referee. Hosting waits
+ * on approval, which is a staff action in the database.
  */
-function AdminGate({ onClose, onPass }) {
+function AuthScreen({ onDone, onBack }) {
+  const [mode, setMode] = useState("in");   // "in" | "up"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [wrong, setWrong] = useState(false);
-  const [errMsg, setErrMsg] = useState("");
+  const [msg, setMsg] = useState(null);     // { tone, text }
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (busy || !email.trim() || !password) return;
-    setBusy(true);
-    setWrong(false);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(true); setMsg(null);
+    const { error } = mode === "in"
+      ? await signIn(email, password)
+      : await signUp(email, password);
     setBusy(false);
-    if (error) { setWrong(true); setErrMsg(error.message); } else onPass();
+    if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
+    if (mode === "up") {
+      setMsg({ tone: C.green, text: "Account made. If the address needs confirming, check your email — then sign in." });
+      setMode("in");
+      return;
+    }
+    onDone();
   };
 
   return (
-    <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 80, background: "#0B0718EE",
-      display: "grid", placeItems: "center", padding: 20,
-    }}>
-      <div style={{
-        width: "100%", maxWidth: 380, background: C.surface,
-        border: `1px solid ${C.line}`, borderRadius: 4, padding: 20,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-          <Blade color={C.magenta} h={24} />
-          <h2 className="bx-d" style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>Admin sign-in</h2>
-        </div>
-        <p style={{ color: C.muted, fontSize: 13.5, margin: "0 0 16px", lineHeight: 1.5 }}>
-          Sign in to run the draw, score matches, and change settings.
-        </p>
-        <input
-          style={{ ...inputStyle, marginBottom: 10, borderColor: wrong ? C.magenta : C.line }}
-          type="email" value={email} autoFocus autoComplete="username"
-          onChange={(e) => { setEmail(e.target.value); setWrong(false); }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Email"
-        />
-        <input
-          style={{ ...inputStyle, borderColor: wrong ? C.magenta : C.line }}
-          type="password" value={password} autoComplete="current-password"
-          onChange={(e) => { setPassword(e.target.value); setWrong(false); }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Password"
-        />
-        {wrong && (
-          <div style={{ color: C.magenta, fontSize: 13, marginTop: 8 }}>
-            {errMsg || "Sign-in failed. Try again."}
-          </div>
+    <div className="bx" style={{ ...shell, display: "grid", placeItems: "center", padding: 20 }}>
+      <Style />
+      <div style={{ width: "100%", maxWidth: 380 }}>
+        {onBack && (
+          <button onClick={onBack} className="bx-d" style={{
+            background: "none", border: "none", color: C.muted, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 6, padding: "0 0 14px", fontSize: 13.5,
+          }}>
+            <ArrowLeft size={15} />All tournaments
+          </button>
         )}
-        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
-          <Btn onClick={onClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 12 }}>Cancel</Btn>
-          <Btn onClick={submit} tone="primary" disabled={busy} style={{ flex: 1, justifyContent: "center", padding: 12 }}>
-            {busy ? "Signing in…" : "Sign in"}
-          </Btn>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ width: 30, height: 3, background: C.magenta, transform: "skewX(-30deg)" }} />
+          <span className="bx-d" style={{ fontSize: 15, color: C.cyan, fontWeight: 700 }}>
+            Beyblade X tournaments
+          </span>
+        </div>
+        <h1 className="bx-d" style={{
+          fontSize: 42, fontWeight: 800, margin: "0 0 18px", lineHeight: .95,
+          background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 48%, ${C.cyan} 100%)`,
+          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+        }}>
+          {mode === "in" ? "Sign in" : "Sign up"}
+        </h1>
+
+        <input
+          style={{ ...inputStyle, marginBottom: 10 }} type="email" autoComplete="username"
+          value={email} onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Email"
+        />
+        <input
+          style={inputStyle} type="password"
+          autoComplete={mode === "in" ? "current-password" : "new-password"}
+          value={password} onChange={(e) => { setPassword(e.target.value); setMsg(null); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Password"
+        />
+        {msg && (
+          <div style={{ color: msg.tone, fontSize: 13, marginTop: 10, lineHeight: 1.5 }}>{msg.text}</div>
+        )}
+
+        <Btn onClick={submit} tone="primary" disabled={busy}
+          style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 17, marginTop: 16 }}>
+          {busy ? "Working…" : mode === "in" ? "Sign in" : "Create account"}
+        </Btn>
+
+        <div style={{ textAlign: "center", marginTop: 14 }}>
+          <button onClick={() => { setMode(mode === "in" ? "up" : "in"); setMsg(null); }}
+            style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13.5 }}>
+            {mode === "in" ? "No account yet? Sign up" : "Already have an account? Sign in"}
+          </button>
         </div>
       </div>
     </div>
   );
 }
+
 
 /** What a spectator sees before the organiser has created anything. */
 function NotLive({ onUnlock }) {
@@ -2928,5 +3284,427 @@ function NotLive({ onUnlock }) {
         </Btn>
       </div>
     </div>
+  );
+}
+
+/* ================================================================== */
+/*  Shell — accounts, the list of tournaments, and what opens          */
+/* ================================================================== */
+
+const FORMAT_LABEL = { knockout: "Groups & knockout", tag: "Tag team", league: "League" };
+
+function SheetFrame({ title, onClose, children }) {
+  const swipeBack = useSwipeBack(onClose);
+  return (
+    <div className="bx" {...swipeBack} style={{
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(null), overflowY: "auto",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
+      }}>
+        <button onClick={onClose} aria-label="Back"
+          style={{ background: "none", border: "none", color: C.ink, cursor: "pointer", display: "flex", padding: 4 }}>
+          <ArrowLeft size={20} />
+        </button>
+        <div className="bx-d" style={{ fontSize: 22, fontWeight: 800 }}>{title}</div>
+      </div>
+      <div style={{ padding: 16, maxWidth: 620, margin: "0 auto" }}>{children}</div>
+    </div>
+  );
+}
+
+function RefereeSheet({ event, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [email, setEmail] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () => eventReferees(event.id).then(setRows);
+  useEffect(() => { refresh(); }, [event.id]);
+
+  const add = async () => {
+    if (busy || !email.trim()) return;
+    setBusy(true); setMsg(null);
+    const { user, error } = await addReferee(event.id, email);
+    setBusy(false);
+    if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
+    setMsg({ tone: C.green, text: user.email + " can now run this tournament." });
+    setEmail("");
+    refresh();
+  };
+
+  return (
+    <SheetFrame title="Referees" onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 18, maxWidth: "58ch" }}>
+        A referee runs <strong style={{ color: C.ink }}>{event.name}</strong> — scores, the draw,
+        the bracket. They cannot rename it, delete it, or take it over, and that is enforced by
+        the database rather than by hiding the buttons.
+      </div>
+
+      <Block title="Add someone"
+        hint="They need an account already, and the address is the one they signed up with. Being a referee needs no approval.">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={inputStyle} type="email" value={email} placeholder="their@email.com"
+            onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+            onKeyDown={(e) => e.key === "Enter" && add()} />
+          <Btn onClick={add} tone="primary" disabled={busy} style={{ flexShrink: 0 }}>
+            <Plus size={16} />Add
+          </Btn>
+        </div>
+        {msg && <div style={{ color: msg.tone, fontSize: 13, marginTop: 9, lineHeight: 1.5 }}>{msg.text}</div>}
+      </Block>
+
+      {rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Nobody else has access yet.</div>
+      ) : rows.map((r) => (
+        <div key={r.userId} style={{ ...card, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name || r.email}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>{r.email}</div>
+          </div>
+          <Btn tone="danger" style={{ padding: "7px 11px" }}
+            onClick={async () => { await removeReferee(event.id, r.userId); refresh(); }}>
+            Remove
+          </Btn>
+        </div>
+      ))}
+    </SheetFrame>
+  );
+}
+
+function ApprovalsSheet({ onClose }) {
+  const [rows, setRows] = useState(null);
+  const refresh = () => pendingHosts().then(setRows);
+  useEffect(() => { refresh(); }, []);
+
+  return (
+    <SheetFrame title="Waiting to host" onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 18, maxWidth: "58ch" }}>
+        Approving lets someone create their own tournaments. It gives them no access to yours.
+      </div>
+      {rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Nobody is waiting.</div>
+      ) : rows.map((r) => (
+        <div key={r.id} style={{ ...card, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5 }}>{r.display_name || r.email}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>{r.email}</div>
+          </div>
+          <Btn tone="primary" style={{ padding: "7px 11px" }}
+            onClick={async () => { await approveHost(r.id, true); refresh(); }}>
+            <Check size={15} />Approve
+          </Btn>
+        </div>
+      ))}
+    </SheetFrame>
+  );
+}
+
+
+/**
+ * The front door. Every live tournament, newest first, gathered under whoever
+ * runs it — a visitor arrives here and clicks straight through to a board,
+ * with no account and nothing to dismiss.
+ *
+ * Signing in is a button in the corner rather than a wall, because almost
+ * everyone who opens this is here to watch, not to score.
+ */
+function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals }) {
+  const hosted = mine.filter((e) => e.role === "owner");
+  const reffed = mine.filter((e) => e.role === "referee");
+
+  // Anything listed above is kept out of the public list below, so a
+  // tournament appears once — under the heading that says what you can do
+  // to it, rather than twice with different implications.
+  const own = new Set(mine.map((e) => e.id));
+  const rest = all.filter((e) => !own.has(e.id));
+
+  // Grouped by organiser, each group newest first, the groups themselves
+  // ordered by whoever started something most recently.
+  const groups = [];
+  const byOwner = new Map();
+  rest.forEach((e) => {
+    if (!byOwner.has(e.owner_id)) {
+      const g = { owner: e.owner_id, organiser: e.organiser, events: [] };
+      byOwner.set(e.owner_id, g);
+      groups.push(g);
+    }
+    byOwner.get(e.owner_id).events.push(e);
+  });
+
+  const Row = ({ e, accent }) => (
+    <button onClick={() => onOpen(e)} style={{
+      width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+      background: C.surface, border: `1px solid ${C.line}`,
+      borderLeft: `3px solid ${accent || C.magenta}`,
+      borderRadius: 3, padding: 13, marginBottom: 7, cursor: "pointer", color: C.ink,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="bx-d" style={{
+          fontSize: 17, fontWeight: 700, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{e.name}</div>
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+          {FORMAT_LABEL[e.format] || e.format}
+          {e.created_at ? ` · ${new Date(e.created_at).toLocaleDateString()}` : ""}
+        </div>
+      </div>
+      <ChevronRight size={16} color={C.muted} />
+    </button>
+  );
+
+  // The heading a section is known by. What you can do to the tournaments
+  // underneath is the thing being named, so the count sits with it.
+  const Heading = ({ title, color, n, right }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+      <span style={{ width: 20, height: 3, background: color, transform: "skewX(-30deg)" }} />
+      <span className="bx-d" style={{ fontSize: 15, fontWeight: 700 }}>{title}</span>
+      <span style={{ fontSize: 12, color: C.muted }}>
+        {n} tournament{n === 1 ? "" : "s"}
+      </span>
+      {right ? <div style={{ marginLeft: "auto" }}>{right}</div> : null}
+    </div>
+  );
+
+  return (
+    <div className="bx" style={{ ...shell, ...arenaStyle(null) }}>
+      <Style />
+      <div style={{ maxWidth: 620, margin: "0 auto", padding: "30px 16px 60px" }}>
+
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 24 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ width: 26, height: 3, background: C.magenta, transform: "skewX(-30deg)" }} />
+              <span className="bx-d" style={{ fontSize: 13.5, color: C.cyan, fontWeight: 700 }}>
+                Beyblade X
+              </span>
+            </div>
+            <h1 className="bx-d" style={{
+              fontSize: 36, fontWeight: 800, margin: 0, lineHeight: .95,
+              background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 55%, ${C.cyan} 100%)`,
+              WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+            }}>Tournaments</h1>
+          </div>
+
+          {profile ? (
+            <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
+              <Unlock size={14} /><span className="bx-role-label">Sign out</span>
+            </Btn>
+          ) : (
+            <Btn onClick={onSignIn} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
+              <Lock size={14} /><span className="bx-role-label">Sign in</span>
+            </Btn>
+          )}
+        </div>
+
+        {profile && (
+          <div style={{ marginBottom: 26 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+              <span className="bx-d" style={{ fontSize: 14, color: C.muted }}>
+                Signed in · {profile.email}
+              </span>
+              {profile.is_staff && (
+                <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
+                  Approvals
+                </Btn>
+              )}
+            </div>
+
+            {profile.approved ? (
+              <Btn onClick={onNew} tone="primary"
+                style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5 }}>
+                <Plus size={16} />New tournament
+              </Btn>
+            ) : (
+              <div style={{
+                background: `${C.gold}14`, border: `1px solid ${C.gold}55`, borderRadius: 3,
+                padding: "12px 14px", display: "flex", gap: 10,
+              }}>
+                <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                  This account is waiting to be approved for hosting. It can still be added as a
+                  referee meanwhile.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Yours to run. */}
+        {hosted.length > 0 && (
+          <div style={{ marginBottom: 26 }}>
+            <Heading title="Hosted" color={C.magenta} n={hosted.length} />
+            {hosted.map((e) => <Row key={e.id} e={e} accent={C.magenta} />)}
+          </div>
+        )}
+
+        {/* Somebody else's, but you keep the score. */}
+        {reffed.length > 0 && (
+          <div style={{ marginBottom: 26 }}>
+            <Heading title="Refereeing" color={C.gold} n={reffed.length} />
+            {reffed.map((e) => <Row key={e.id} e={e} accent={C.gold} />)}
+          </div>
+        )}
+
+        {/* Everything else, to watch. */}
+        {rest.length > 0 && (
+          <div>
+            <Heading title="Watch" color={C.cyan} n={rest.length} />
+            {groups.map((g) => (
+              <div key={g.owner} style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <Blade color={C.cyan} h={14} />
+                  <span className="bx-d" style={{ fontSize: 14, fontWeight: 700, color: C.muted }}>
+                    {g.organiser}
+                  </span>
+                </div>
+                {g.events.map((e) => <Row key={e.id} e={e} accent={C.cyan} />)}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {all.length === 0 && (
+          <div style={{ ...card, textAlign: "center", padding: "40px 20px" }}>
+            <div className="bx-d" style={{ fontSize: 20, fontWeight: 700, marginBottom: 7 }}>
+              Nothing running yet
+            </div>
+            <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, maxWidth: "40ch", margin: "0 auto" }}>
+              Tournaments appear here as organisers start them.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * Decides what you are looking at: a shared scoreboard, the sign-in, your list,
+ * or one tournament. A `?t=` link opens that tournament for anyone, signed in or
+ * not, which is what a spectator scanning a QR code needs.
+ */
+export default function App() {
+  const [session, setSession] = useState(undefined);   // undefined while unknown
+  const [profile, setProfile] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [openId, setOpenId] = useState(() => new URLSearchParams(location.search).get("t"));
+  const [making, setMaking] = useState(false);
+  const [sheet, setSheet] = useState(null);            // "referees" | "approvals"
+  const [directory, setDirectory] = useState([]);      // every live tournament
+  const [signingIn, setSigningIn] = useState(false);
+
+  useEffect(() => {
+    currentSession().then(setSession);
+    return onAuthChange(setSession);
+  }, []);
+
+  // The directory is public, so it loads for everyone and does not wait on a
+  // session that most visitors will never have.
+  useEffect(() => { publicEvents().then(setDirectory); }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(null); setEvents([]); return; }
+    loadProfile(session.user.id).then(setProfile);
+    myEvents(session.user.id).then(setEvents);
+    setSigningIn(false);
+  }, [session]);
+
+  // The address bar is the navigation, so a tournament's link is shareable and
+  // the browser's own back button behaves.
+  useEffect(() => {
+    const onPop = () => setOpenId(new URLSearchParams(location.search).get("t"));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const openEvent = (id) => {
+    history.pushState({}, "", "?t=" + id);
+    setOpenId(id);
+  };
+  const backToList = () => {
+    history.pushState({}, "", location.pathname);
+    setOpenId(null);
+  };
+  const refreshEvents = async () => {
+    publicEvents().then(setDirectory);
+    if (session) await myEvents(session.user.id).then(setEvents);
+  };
+
+  const open = events.find((e) => e.id === openId);
+
+  if (session === undefined) {
+    return (
+      <div className="bx" style={{ ...shell, display: "grid", placeItems: "center" }}>
+        <Style /><span style={{ color: C.muted }}>Loading…</span>
+      </div>
+    );
+  }
+
+  // A shared link opens the board for anyone. The controls are offered only
+  // where this account owns or referees it; the database decides the rest.
+  if (openId) {
+    return (
+      <>
+        <Board
+          eventId={openId}
+          canEdit={!!open}
+          isOwner={open ? open.role === "owner" : false}
+          onExit={backToList}
+          onReferees={open && open.role === "owner" ? () => setSheet("referees") : null}
+          onDelete={async () => {
+            await deleteEvent(openId);
+            await refreshEvents();
+            backToList();
+          }}
+        />
+        {sheet === "referees" && open && (
+          <RefereeSheet event={open} onClose={() => setSheet(null)} />
+        )}
+      </>
+    );
+  }
+
+  if (signingIn && !session) {
+    return <AuthScreen onDone={() => setSigningIn(false)} onBack={() => setSigningIn(false)} />;
+  }
+
+  if (making) {
+    return (
+      <>
+        <Style />
+        <Setup onCreate={async (v) => {
+          const { row, error } = await createEvent({
+            name: v.name, format: v.format || "knockout", data: v,
+          });
+          setMaking(false);
+          if (error) { console.error(error); return; }
+          await refreshEvents();
+          if (row) openEvent(row.id);
+        }} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Directory
+        profile={profile}
+        mine={events}
+        all={directory}
+        onOpen={(e) => openEvent(e.id)}
+        onNew={() => setMaking(true)}
+        onApprovals={() => setSheet("approvals")}
+        onSignIn={() => setSigningIn(true)}
+        onSignOut={async () => { await signOut(); setOpenId(null); }}
+      />
+      {sheet === "approvals" && <ApprovalsSheet onClose={() => setSheet(null)} />}
+    </>
   );
 }
