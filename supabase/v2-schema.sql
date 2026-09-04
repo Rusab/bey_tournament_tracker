@@ -21,21 +21,22 @@ create table if not exists profiles (
 
 alter table profiles enable row level security;
 
--- Every signup gets a profile, unapproved. Signing up is therefore safe:
--- it grants the ability to be *added* as a referee, nothing more.
-create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public as $$
+-- Every account gets a profile, unapproved. Signing up is therefore safe on
+-- its own: it grants the ability to be *added* as a referee, nothing more.
+--
+-- Deliberately not a trigger on auth.users. That schema belongs to Supabase
+-- and newer projects refuse `create trigger` on it — and because the SQL
+-- editor runs a script in one transaction, that single refusal rolls the
+-- whole file back. The app calls this once after signing in instead.
+create or replace function public.ensure_profile()
+returns void language plpgsql security definer set search_path = public as $$
 begin
   insert into public.profiles (id, email, display_name)
-  values (new.id, new.email, split_part(coalesce(new.email, ''), '@', 1))
+  select u.id, u.email, split_part(coalesce(u.email, ''), '@', 1)
+  from auth.users u
+  where u.id = auth.uid()
   on conflict (id) do nothing;
-  return new;
 end $$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_user();
 
 -- Anyone who signed up before this file ran.
 insert into profiles (id, email, display_name)
@@ -205,11 +206,14 @@ drop trigger if exists events_touch on events;
 create trigger events_touch before update on events
   for each row execute function public.touch_updated_at();
 
--- Spectators follow along without polling.
+-- Spectators follow along without polling. Catching everything, not just a
+-- repeat run: the whole file is one transaction, and realtime is not worth
+-- rolling the schema back over. The app polls as a fallback regardless.
 do $$
 begin
   alter publication supabase_realtime add table events;
-exception when duplicate_object then null;
+exception when others then
+  raise notice 'realtime not enabled for events (%), the poll still covers it', sqlerrm;
 end $$;
 
 -- =====================================================================

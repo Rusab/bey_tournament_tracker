@@ -82,6 +82,21 @@ All three share one blob shape; `format` says how to read it.
 With several tournaments live, a QR code has to name one: `/?t=<event id>`.
 `scripts/make-qr.mjs` takes that id and the tournament's own logo.
 
+## Applying the schema
+
+Run **`supabase/v2-schema.sql` in full** in the Supabase SQL editor, then the
+one line at the bottom of it that makes you staff. That order is not optional:
+the line updates a table the file creates.
+
+The editor runs a file as a single transaction, so a failure anywhere rolls
+back everything and the error you see may name a table that was never created.
+`node scripts/check-sql.mjs supabase/v2-schema.sql` parses a migration with
+Postgres's own parser first, which rules out shape as the cause.
+
+The profile row is created by `ensure_profile()`, which the app calls once
+after signing in — deliberately not a trigger on `auth.users`, which Supabase
+owns and newer projects refuse.
+
 ## Build order
 
 1. **Schema** — `supabase/v2-schema.sql`. Blocks everything else.

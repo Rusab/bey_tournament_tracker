@@ -17,6 +17,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "jsqr": "^1.4.0",
+    "pg-query-emscripten": "^5.1.0",
     "qrcode": "^1.5.4",
     "sharp": "^0.35.4",
     "vite": "^5.4.6"
