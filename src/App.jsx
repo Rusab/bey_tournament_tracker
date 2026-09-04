@@ -36,6 +36,19 @@ const awardOf = (key) => AWARDS.find((a) => a.key === key);
 
 const GROUP_LETTERS = "ABCDEFGH".split("");
 
+/*
+ * A league is one group holding everyone, played as a round robin, with no
+ * knockout after it — so the fixtures, the scoring and the match views are the
+ * ones already here. The only genuinely new part is ranking on league points
+ * rather than on wins.
+ */
+const isLeague = (t) => t && t.format === "league";
+const defaultLeaguePoints = () => ({ win: "3", draw: "1" });
+
+/** Which tabs a format has: no groups to draw, and no bracket to build. */
+const tabsFor = (t) =>
+  isLeague(t) ? ["matches", "table", "players"] : TABS;
+
 /* A team is a competitor like any other; only the wording changes. */
 const isTag = (t) => t && t.format === "tag";
 const oneWord = (t) => (isTag(t) ? "team" : "blader");
@@ -286,10 +299,16 @@ function buildGroupMatches(groups, existing = []) {
   return out;
 }
 
-function computeStandings(playerIds, matches, nameOf) {
+/**
+ * @param lp  league points, e.g. { win: "3", draw: "1" }. When given, the table
+ *            ranks on points earned rather than on wins. A draw is all but
+ *            impossible while a match runs to a target, but it costs nothing to
+ *            count and would otherwise silently score zero.
+ */
+function computeStandings(playerIds, matches, nameOf, lp) {
   const rec = {};
   playerIds.forEach((id) => {
-    rec[id] = { id, played: 0, wins: 0, losses: 0, pf: 0, pa: 0, winMargin: 0 };
+    rec[id] = { id, played: 0, wins: 0, losses: 0, draws: 0, pts: 0, pf: 0, pa: 0, winMargin: 0 };
   });
   matches.forEach((m) => {
     if (!m.done) return;
@@ -300,9 +319,16 @@ function computeStandings(playerIds, matches, nameOf) {
     a.pf += s1; a.pa += s2; b.pf += s2; b.pa += s1;
     if (s1 > s2) { a.wins++; b.losses++; a.winMargin += s1 - s2; }
     else if (s2 > s1) { b.wins++; a.losses++; b.winMargin += s2 - s1; }
+    else { a.draws++; b.draws++; }
   });
+
+  if (lp) {
+    Object.values(rec).forEach((r) => { r.pts = r.wins * num(lp.win) + r.draws * num(lp.draw); });
+  }
+
   return Object.values(rec).sort(
     (x, y) =>
+      (lp ? y.pts - x.pts : 0) ||
       y.wins - x.wins ||
       y.winMargin - x.winMargin ||
       (y.pf - y.pa) - (x.pf - x.pa) ||
@@ -925,6 +951,11 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
   }, [tab]);
 
+  // The remembered tab may not exist in this format — a league has no bracket.
+  useEffect(() => {
+    if (t && !tabsFor(t).includes(tab)) setTab(tabsFor(t)[0]);
+  }, [t, tab]);
+
   useEffect(() => {
     try { localStorage.setItem(GROUP_KEY, group); } catch (e) { /* private mode */ }
   }, [group]);
@@ -1057,8 +1088,9 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
     if (Math.abs(dx) < SWIPE_MIN_X) return;
     if (Math.abs(dx) < Math.abs(dy) * SWIPE_X_OVER_Y) return; // a scroll, not a swipe
 
-    const next = TABS.indexOf(tab) + (dx < 0 ? 1 : -1);
-    if (next >= 0 && next < TABS.length) goTab(TABS[next]); // no wrap-around
+    const list = tabsFor(t);
+    const next = list.indexOf(tab) + (dx < 0 ? 1 : -1);
+    if (next >= 0 && next < list.length) goTab(list[next]); // no wrap-around
   };
 
   if (!loaded) {
@@ -1191,16 +1223,16 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       <nav style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 20,
         background: C.surface, borderTop: `1px solid ${C.line}`,
-        display: "grid", gridTemplateColumns: "repeat(5,1fr)",
+        display: "grid", gridTemplateColumns: `repeat(${tabsFor(t).length},1fr)`,
         paddingBottom: "env(safe-area-inset-bottom)",
       }}>
         {[
           ["groups", Users, "Groups"],
           ["matches", Swords, "Matches"],
-          ["table", Table2, "Table"],
+          ["table", Table2, isLeague(t) ? "League" : "Table"],
           ["bracket", GitBranch, "Bracket"],
           ["players", Trophy, manyWord(t)],
-        ].map(([k, Icon, label]) => {
+        ].filter(([k]) => tabsFor(t).includes(k)).map(([k, Icon, label]) => {
           const on = tab === k;
           return (
             <button key={k} onClick={() => goTab(k)}
@@ -1352,6 +1384,7 @@ function Setup({ onCreate }) {
   const [koSize, setKoSize] = useState(8);
   const [third, setThird] = useState(true);
   const [points, setPoints] = useState(defaultPoints());
+  const [leaguePoints, setLeaguePoints] = useState(defaultLeaguePoints());
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
@@ -1384,8 +1417,9 @@ function Setup({ onCreate }) {
     setBulk("");
   };
 
+  const league = format === "league";
   const qualifiers = numGroups * advance;
-  const tooMany = koSize > 0 && qualifiers > koSize;
+  const tooMany = !league && koSize > 0 && qualifiers > koSize;
   const byes = koSize > 0 ? Math.max(0, koSize - qualifiers) : 0;
 
   /* The smallest knockout that would hold this many qualifiers, offered as a
@@ -1396,16 +1430,34 @@ function Setup({ onCreate }) {
    * Why the button is disabled, in the order worth fixing. A greyed-out
    * button with the reason somewhere further up the page reads as broken.
    */
+  const least = league ? 2 : numGroups * 2;   // a league needs only an opponent
   const blocker = !name.trim()
     ? "Give the tournament a name first."
-    : players.length < numGroups * 2
-      ? `${numGroups} groups need at least ${numGroups * 2} bladers, and there ${players.length === 1 ? "is" : "are"} ${players.length}.`
+    : players.length < least
+      ? league
+        ? `A league needs at least two ${format === "tag" ? "teams" : "bladers"}, and there ${players.length === 1 ? "is 1" : "are " + players.length}.`
+        : `${numGroups} groups need at least ${least} bladers, and there ${players.length === 1 ? "is" : "are"} ${players.length}.`
       : tooMany
         ? `${numGroups} groups × ${advance} advancing makes ${qualifiers} qualifiers, and the knockout only has ${koSize} places.`
         : null;
   const ready = !blocker;
 
   const create = () => {
+    /*
+     * A league is one group holding everyone, so its fixtures exist the moment
+     * it is created — there is no draw to make. Everything downstream then
+     * treats it as the group stage of a tournament that has no knockout.
+     */
+    if (league) {
+      const table = [{ id: "g0", name: "League", playerIds: players.map((p) => p.id) }];
+      onCreate({
+        name: name.trim(), format, players, groups: table, points,
+        leaguePoints, advance: 1, koSize: 0, thirdPlace: false,
+        groupMatches: buildGroupMatches(table), bracket: null, bgUrl, logoUrl,
+      });
+      return;
+    }
+
     const groups = Array.from({ length: numGroups }, (_, i) => ({
       id: "g" + i, name: "Group " + GROUP_LETTERS[i], playerIds: [],
     }));
@@ -1445,10 +1497,13 @@ function Setup({ onCreate }) {
         </Field>
 
         <Field label="Format"
-          hint="A tag team is one competitor with a name and members — it draws, plays and scores exactly as a single blader does.">
+          hint={format === "league"
+            ? "Everyone plays everyone once, ranked on league points. No groups to draw and no knockout."
+            : "A tag team is one competitor with a name and members — it draws, plays and scores exactly as a single blader does."}>
           <Segmented value={format} onChange={setFormat} options={[
             { value: "knockout", label: "Groups & knockout" },
             { value: "tag", label: "Tag team" },
+            { value: "league", label: "League" },
           ]} />
         </Field>
 
@@ -1499,6 +1554,27 @@ function Setup({ onCreate }) {
           {bulk.trim() && <Btn onClick={addBulk} style={{ marginTop: 6 }}>Add pasted names</Btn>}
         </Field>
 
+        {format === "league" ? (
+          <>
+            <Block title="League points"
+              hint="A match run to a target rarely ends level, but a draw is counted rather than quietly scoring nothing.">
+              <div style={{ display: "flex", gap: 10 }}>
+                <NumField label="For a win" value={leaguePoints.win}
+                  onChange={(v) => setLeaguePoints((l) => ({ ...l, win: v }))} />
+                <NumField label="For a draw" value={leaguePoints.draw}
+                  onChange={(v) => setLeaguePoints((l) => ({ ...l, draw: v }))} />
+              </div>
+            </Block>
+
+            <Field label="Points to win a match"
+              hint="Every fixture runs to this target. A finish that would overshoot is capped.">
+              <Segmented value={points.group}
+                onChange={(v) => setPoints((p) => ({ ...p, group: v }))}
+                options={[3, 4, 5, 7, 9].map((n) => ({ value: n, label: String(n) }))} />
+            </Field>
+          </>
+        ) : (
+          <>
         <Field label="Number of groups">
           <Segmented value={numGroups} onChange={setNumGroups}
             options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: n, label: String(n) }))} />
@@ -1544,6 +1620,8 @@ function Setup({ onCreate }) {
           hint="Each stage runs on its own target. A finish that would overshoot is capped — on a first-to-4 match, an Xtreme at 2–1 finishes it 4–1, not 5–1.">
           <StagePoints koSize={koSize} thirdPlace={third} points={points} onChange={setPoints} />
         </Field>
+          </>
+        )}
 
         <Btn onClick={create} tone="primary" disabled={!ready}
           style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 18, marginTop: 8 }}>
@@ -1830,8 +1908,11 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
   }
   return (
     <div>
-      <SectionHead title="Group matches"
-        sub={`Everyone plays everyone in their group, first to ${t.points.group}.` + (isAdmin ? " Tap a match to score it." : "")} />
+      <SectionHead title={isLeague(t) ? "Fixtures" : "Group matches"}
+        sub={(isLeague(t)
+          ? `Everyone plays everyone once, first to ${t.points.group}.`
+          : `Everyone plays everyone in their group, first to ${t.points.group}.`)
+          + (isAdmin ? " Tap a match to score it." : "")} />
       <GroupPicker t={t} value={group} onChange={setGroup} />
       {/* Indexed over every group, not the filtered set, so each keeps its colour. */}
       {t.groups.map((g, gi) => {
@@ -1914,7 +1995,8 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
         .filter((m) => (m.events || []).length > 0).length
     : 0;
 
-  const kings = allPlayed ? swissKings(t) : [];
+  // A league has no group stage to be king of; its table already says who won.
+  const kings = allPlayed && !isLeague(t) ? swissKings(t) : [];
 
   // The trophy is lifted, or there was never a knockout to lift one in.
   const champion = t.bracket
@@ -1928,8 +2010,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
 
   return (
     <div>
-      <SectionHead title="Standings" color={C.cyan}
-        sub="Ranked by wins, then by total margin across won matches only. Tap a name for that blader's record." />
+      <SectionHead title={isLeague(t) ? "League table" : "Standings"} color={C.cyan}
+        sub={isLeague(t)
+          ? `${num(t.leaguePoints && t.leaguePoints.win)} for a win, ${num(t.leaguePoints && t.leaguePoints.draw)} for a draw, then winning margin. Tap a name for that ${oneWord(t)}'s record.`
+          : `Ranked by wins, then by total margin across won matches only. Tap a name for that ${oneWord(t)}'s record.`} />
 
       {kings.length > 0 && (
         <div style={{
@@ -1958,7 +2042,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
       {t.groups.map((g, gi) => {
         if (group !== ALL_GROUPS && g.id !== group) return null;
         const ms = t.groupMatches.filter((m) => m.groupId === g.id);
-        const rows = computeStandings(g.playerIds, ms, nameOf);
+        const rows = computeStandings(g.playerIds, ms, nameOf, isLeague(t) ? t.leaguePoints : null);
         const col = GROUP_COLORS[gi % GROUP_COLORS.length];
         return (
           <div key={g.id} style={{ ...card, marginBottom: 14, padding: 0, overflow: "hidden", borderLeft: `4px solid ${col}` }}>
@@ -1969,7 +2053,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                 <thead>
                   <tr style={{ color: C.muted, fontSize: 12 }}>
-                    {["", "Blader", "P", "W", "L", "Margin", "+/−"].map((h, i) => (
+                    {(isLeague(t)
+                      ? ["", manyWord(t).replace(/s$/, ""), "P", "W", "L", "Pts", "Margin"]
+                      : ["", manyWord(t).replace(/s$/, ""), "P", "W", "L", "Margin", "+/−"]
+                    ).map((h, i) => (
                       <th key={i} style={{
                         textAlign: i === 1 ? "left" : i === 0 ? "center" : "right",
                         padding: "7px 10px", fontWeight: 600,
@@ -1980,7 +2067,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
                 </thead>
                 <tbody>
                   {rows.map((r, i) => {
-                    const q = i < t.advance;
+                    const q = isLeague(t) ? i === 0 : i < t.advance;
                     return (
                       <tr key={r.id} onClick={() => onPlayer(r.id)} style={{ cursor: "pointer" }}>
                         <td style={{ ...td, textAlign: "center", color: q ? C.gold : C.muted, fontWeight: 800, width: 26 }}>{i + 1}</td>
@@ -1988,8 +2075,17 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
                         <td style={td}>{r.played}</td>
                         <td style={{ ...td, fontWeight: 700 }}>{r.wins}</td>
                         <td style={td}>{r.losses}</td>
-                        <td style={{ ...td, color: C.cyan, fontWeight: 700 }}>{r.winMargin}</td>
-                        <td style={{ ...td, color: C.muted }}>{r.pf - r.pa > 0 ? "+" : ""}{r.pf - r.pa}</td>
+                        {isLeague(t) ? (
+                          <>
+                            <td style={{ ...td, color: C.cyan, fontWeight: 800 }}>{r.pts}</td>
+                            <td style={{ ...td, color: C.muted }}>{r.winMargin}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td style={{ ...td, color: C.cyan, fontWeight: 700 }}>{r.winMargin}</td>
+                            <td style={{ ...td, color: C.muted }}>{r.pf - r.pa > 0 ? "+" : ""}{r.pf - r.pa}</td>
+                          </>
+                        )}
                       </tr>
                     );
                   })}
