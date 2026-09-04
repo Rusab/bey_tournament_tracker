@@ -4,12 +4,13 @@ import {
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
   Image as ImageIcon, Download, Crown,
 } from "lucide-react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+import { supabase } from "./lib/supabase.js";
+import {
+  loadEvent, eventStamp, saveEvent, subscribeEvent,
+  currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
+  myEvents, createEvent, archiveEvent, deleteEvent,
+  eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
+} from "./lib/db.js";
 
 /* ================================================================== */
 /*  Domain                                                             */
@@ -34,62 +35,21 @@ const AWARDS = [...FINISHES, PENALTY];
 const awardOf = (key) => AWARDS.find((a) => a.key === key);
 
 const GROUP_LETTERS = "ABCDEFGH".split("");
-const ROW_ID = "current"; // one row holds the live tournament
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-/* ------------------------------------------------------------------
-   Persistence adapter. Everything the app saves goes through here.
-   Backed by Supabase: the "tournaments" table + row-level security
-   policies are what actually stop writes from anyone not signed in —
-   see SETUP.md.
------------------------------------------------------------------- */
-const store = {
-  /** The whole row — the tournament plus the timestamp used to spot changes. */
-  async loadRow() {
-    const { data, error } = await supabase
-      .from("tournaments").select("data, updated_at").eq("id", ROW_ID).maybeSingle();
-    if (error) { console.error(error); return null; }
-    return data || null;
-  },
-
-  /**
-   * Just the timestamp — a few hundred bytes. Polling this instead of the whole
-   * tournament is what makes a safety-net poll affordable with a hall full of
-   * spectators: the 50KB board is only fetched when it has actually changed.
-   */
-  async stamp() {
-    const { data, error } = await supabase
-      .from("tournaments").select("updated_at").eq("id", ROW_ID).maybeSingle();
-    if (error) return null;
-    return data ? data.updated_at : null;
-  },
-
-  async save(value) {
-    const { data, error } = await supabase
-      .from("tournaments")
-      .upsert({ id: ROW_ID, data: value, updated_at: new Date().toISOString() })
-      .select("updated_at").maybeSingle();
-    if (error) { console.error(error); return null; }
-    return data ? data.updated_at : null;
-  },
-
-  /**
-   * Realtime is the fast path, not the only path. onStatus reporting SUBSCRIBED
-   * means the socket opened — it does NOT prove row changes are being delivered
-   * (a table missing from the supabase_realtime publication connects happily and
-   * then says nothing), so the poll in App runs regardless.
-   */
-  subscribe(onChange, onStatus) {
-    const ch = supabase
-      .channel("tournament")
-      .on("postgres_changes",
-          { event: "*", schema: "public", table: "tournaments", filter: `id=eq.${ROW_ID}` },
-          (payload) => { if (payload.new && payload.new.data) onChange(payload.new.data, payload.new.updated_at); })
-      .subscribe((status) => { if (onStatus) onStatus(status); });
-    return () => supabase.removeChannel(ch);
-  },
-};
+/*
+ * The board reads and writes one tournament, named by id. Which tournaments an
+ * account may write is not decided here at all — the database decides, through
+ * row policies and column grants — so `canEdit` below only governs what the
+ * interface offers, never what is permitted.
+ */
+const storeFor = (eventId) => ({
+  loadRow: () => loadEvent(eventId),
+  stamp: () => eventStamp(eventId),
+  save: (value) => saveEvent(eventId, { data: value }),
+  subscribe: (onChange, onStatus) => subscribeEvent(eventId, onChange, onStatus),
+});
 
 /** How often to ask "has anything changed?" when realtime is quiet. */
 const POLL_MS = 15000;
@@ -929,10 +889,16 @@ function scoredCount(t) {
 }
 
 /* ================================================================== */
-/*  App                                                                */
+/*  The board — one tournament                                         */
 /* ================================================================== */
 
-export default function App() {
+/**
+ * @param eventId  which tournament to read and write
+ * @param canEdit  whether to offer the controls. The database decides what is
+ *                 actually permitted; this only decides what is shown.
+ * @param onExit   back to the list, when there is a list to go back to
+ */
+function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [t, setT] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState(initialTab);
@@ -940,12 +906,11 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
-  const [role, setRole] = useState("spectator");
-  const [showGate, setShowGate] = useState(false);
   const [live, setLive] = useState(false);
   const [slide, setSlide] = useState(null); // direction of the last tab change
   const [group, setGroup] = useState(initialGroup);
-  const isAdmin = role === "admin";
+  const isAdmin = canEdit;
+  const store = useMemo(() => storeFor(eventId), [eventId]);
 
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
@@ -977,26 +942,22 @@ export default function App() {
   };
 
   useEffect(() => {
+    let live = true;
+    setLoaded(false);
     (async () => {
       const row = await store.loadRow();
+      if (!live) return;                 // the tournament changed under us
       if (row) {
         lastStamp.current = row.updated_at;
         lastJson.current = JSON.stringify(row.data);
         setT(row.data);
+      } else {
+        setT(null);
       }
       setLoaded(true);
     })();
-
-    // Supabase's own session is the source of truth for admin access —
-    // not anything held in this browser's state.
-    supabase.auth.getSession().then(({ data }) => {
-      setRole(data.session ? "admin" : "spectator");
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setRole(session ? "admin" : "spectator");
-    });
-    return () => sub.subscription.unsubscribe();
-  }, []);
+    return () => { live = false; };
+  }, [store]);
 
   // Every device follows the board, admin phones included — scoring on the PC
   // has to show up on the phone in your pocket. Only this device's own save is
@@ -1006,7 +967,7 @@ export default function App() {
       (incoming, stamp) => applyIncoming(incoming, stamp),
       (status) => setLive(status === "SUBSCRIBED")
     );
-  }, []);
+  }, [store]);
 
   // The safety net, and it runs even when realtime claims to be connected:
   // a connected socket is not proof that row changes are being delivered.
@@ -1028,7 +989,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", tick);
       window.removeEventListener("focus", tick);
     };
-  }, [loaded]);
+  }, [loaded, store]);
 
   useEffect(() => {
     if (!loaded || !t || !isAdmin) return;
@@ -1041,7 +1002,7 @@ export default function App() {
       // rather than sitting on a change the server never took.
       else lastJson.current = null;
     });
-  }, [t, loaded, isAdmin]);
+  }, [t, loaded, isAdmin, store]);
 
   const nameOf = useMemo(() => {
     const map = {};
@@ -1099,18 +1060,16 @@ export default function App() {
     );
   }
 
+  // A tournament always exists by the time the board opens — it is created from
+  // the list, not from in here. An empty one means the row was deleted while
+  // somebody was looking at it.
   if (!t) {
-    if (!isAdmin) {
-      return (
-        <>
-          <Style />
-          <NotLive onUnlock={() => setShowGate(true)} />
-          {showGate && <AdminGate onClose={() => setShowGate(false)}
-            onPass={() => setShowGate(false)} />}
-        </>
-      );
-    }
-    return <><Style /><Setup onCreate={(v) => { setT(v); setTab("groups"); }} /></>;
+    return (
+      <>
+        <Style />
+        <NotLive onUnlock={onExit} />
+      </>
+    );
   }
 
   const allMatches = [
@@ -1176,20 +1135,18 @@ export default function App() {
             <span>{t.players.length} bladers · {t.groups.length} group{t.groups.length > 1 ? "s" : ""} · top {t.advance} advance</span>
           </div>
         </div>
-        <button
-          onClick={() => (isAdmin ? supabase.auth.signOut() : setShowGate(true))}
-          aria-label={isAdmin ? "Leave admin mode" : "Enter admin mode"}
-          className="bx-d"
-          style={{
-            background: isAdmin ? `${C.magenta}1F` : "transparent",
-            border: `1px solid ${isAdmin ? C.magenta : C.line}`,
-            color: isAdmin ? C.magenta : C.muted, cursor: "pointer",
-            padding: "6px 9px", borderRadius: 3, fontSize: 13, fontWeight: 700,
-            display: "flex", alignItems: "center", gap: 5,
-          }}>
-          {isAdmin ? <Unlock size={14} /> : <Lock size={14} />}
-          <span className="bx-role-label">{isAdmin ? "Admin" : "View"}</span>
-        </button>
+        {onExit && (
+          <button onClick={onExit} aria-label="All tournaments" className="bx-d"
+            style={{
+              background: "transparent", border: `1px solid ${C.line}`,
+              color: C.muted, cursor: "pointer",
+              padding: "6px 9px", borderRadius: 3, fontSize: 13, fontWeight: 700,
+              display: "flex", alignItems: "center", gap: 5,
+            }}>
+            <ArrowLeft size={14} />
+            <span className="bx-role-label">All</span>
+          </button>
+        )}
         {isAdmin && (
           <button onClick={() => setShowSetup(true)} aria-label="Tournament settings"
             style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 6 }}>
@@ -1267,13 +1224,12 @@ export default function App() {
       )}
       {showSetup && isAdmin && (
         <SettingsSheet t={t} update={update} onClose={() => setShowSetup(false)}
-          onReset={() => { setT(null); setShowSetup(false); }} />
+          onReferees={isOwner ? onReferees : null}
+          canDelete={isOwner}
+          onReset={() => { setShowSetup(false); if (onDelete) onDelete(); }} />
       )}
       {showFinal && isAdmin && (
         <FinalStandingsSheet t={t} onClose={() => setShowFinal(false)} />
-      )}
-      {showGate && (
-        <AdminGate onClose={() => setShowGate(false)} onPass={() => setShowGate(false)} />
       )}
     </div>
   );
@@ -2719,7 +2675,7 @@ function FinalStandingsSheet({ t, onClose }) {
   );
 }
 
-function SettingsSheet({ t, update, onClose, onReset }) {
+function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
   const [confirm, setConfirm] = useState(false);
   const [askClear, setAskClear] = useState(false);
   const scored = scoredCount(t);
@@ -2807,10 +2763,22 @@ function SettingsSheet({ t, update, onClose, onReset }) {
           </Btn>
         </div>
 
+        {onReferees && (
+          <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+            <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Referees</div>
+            <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
+              Someone you trust to run this tournament — scores, draws and the bracket.
+              They cannot rename it, delete it, or take it over.
+            </div>
+            <Btn onClick={onReferees}><Users size={15} />Manage referees</Btn>
+          </div>
+        )}
+
+        {canDelete && (
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Start over</div>
           <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
-            Deletes this tournament and everything in it, then takes you back to setup.
+            Deletes this tournament and everything in it, and returns you to your list.
           </div>
           {confirm ? (
             <div style={{ display: "flex", gap: 8 }}>
@@ -2821,6 +2789,7 @@ function SettingsSheet({ t, update, onClose, onReset }) {
             <Btn onClick={() => setConfirm(true)} tone="danger"><Trash2 size={15} />Delete tournament</Btn>
           )}
         </div>
+        )}
       </div>
 
       {askClear && (
@@ -2840,71 +2809,82 @@ function SettingsSheet({ t, update, onClose, onReset }) {
 /* ================================================================== */
 
 /**
- * Real sign-in against Supabase auth. Success here only unlocks the admin
- * UI locally — the "tournaments" table's row-level security policies are
- * what actually reject writes from anyone without a valid session.
+ * Signing in, and signing up. Registering on its own grants nothing: the
+ * account exists, unapproved, and can be added as a referee. Hosting waits
+ * on approval, which is a staff action in the database.
  */
-function AdminGate({ onClose, onPass }) {
+function AuthScreen({ onDone }) {
+  const [mode, setMode] = useState("in");   // "in" | "up"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [wrong, setWrong] = useState(false);
-  const [errMsg, setErrMsg] = useState("");
+  const [msg, setMsg] = useState(null);     // { tone, text }
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (busy || !email.trim() || !password) return;
-    setBusy(true);
-    setWrong(false);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(true); setMsg(null);
+    const { error } = mode === "in"
+      ? await signIn(email, password)
+      : await signUp(email, password);
     setBusy(false);
-    if (error) { setWrong(true); setErrMsg(error.message); } else onPass();
+    if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
+    if (mode === "up") {
+      setMsg({ tone: C.green, text: "Account made. If the address needs confirming, check your email — then sign in." });
+      setMode("in");
+      return;
+    }
+    onDone();
   };
 
   return (
-    <div className="bx" style={{
-      position: "fixed", inset: 0, zIndex: 80, background: "#0B0718EE",
-      display: "grid", placeItems: "center", padding: 20,
-    }}>
-      <div style={{
-        width: "100%", maxWidth: 380, background: C.surface,
-        border: `1px solid ${C.line}`, borderRadius: 4, padding: 20,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-          <Blade color={C.magenta} h={24} />
-          <h2 className="bx-d" style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>Admin sign-in</h2>
+    <div className="bx" style={{ ...shell, display: "grid", placeItems: "center", padding: 20 }}>
+      <Style />
+      <div style={{ width: "100%", maxWidth: 380 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ width: 30, height: 3, background: C.magenta, transform: "skewX(-30deg)" }} />
+          <span className="bx-d" style={{ fontSize: 15, color: C.cyan, fontWeight: 700 }}>
+            Beyblade X tournaments
+          </span>
         </div>
-        <p style={{ color: C.muted, fontSize: 13.5, margin: "0 0 16px", lineHeight: 1.5 }}>
-          Sign in to run the draw, score matches, and change settings.
-        </p>
+        <h1 className="bx-d" style={{
+          fontSize: 42, fontWeight: 800, margin: "0 0 18px", lineHeight: .95,
+          background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 48%, ${C.cyan} 100%)`,
+          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+        }}>
+          {mode === "in" ? "Sign in" : "Sign up"}
+        </h1>
+
         <input
-          style={{ ...inputStyle, marginBottom: 10, borderColor: wrong ? C.magenta : C.line }}
-          type="email" value={email} autoFocus autoComplete="username"
-          onChange={(e) => { setEmail(e.target.value); setWrong(false); }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Email"
+          style={{ ...inputStyle, marginBottom: 10 }} type="email" autoComplete="username"
+          value={email} onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Email"
         />
         <input
-          style={{ ...inputStyle, borderColor: wrong ? C.magenta : C.line }}
-          type="password" value={password} autoComplete="current-password"
-          onChange={(e) => { setPassword(e.target.value); setWrong(false); }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Password"
+          style={inputStyle} type="password"
+          autoComplete={mode === "in" ? "current-password" : "new-password"}
+          value={password} onChange={(e) => { setPassword(e.target.value); setMsg(null); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Password"
         />
-        {wrong && (
-          <div style={{ color: C.magenta, fontSize: 13, marginTop: 8 }}>
-            {errMsg || "Sign-in failed. Try again."}
-          </div>
+        {msg && (
+          <div style={{ color: msg.tone, fontSize: 13, marginTop: 10, lineHeight: 1.5 }}>{msg.text}</div>
         )}
-        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
-          <Btn onClick={onClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 12 }}>Cancel</Btn>
-          <Btn onClick={submit} tone="primary" disabled={busy} style={{ flex: 1, justifyContent: "center", padding: 12 }}>
-            {busy ? "Signing in…" : "Sign in"}
-          </Btn>
+
+        <Btn onClick={submit} tone="primary" disabled={busy}
+          style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 17, marginTop: 16 }}>
+          {busy ? "Working…" : mode === "in" ? "Sign in" : "Create account"}
+        </Btn>
+
+        <div style={{ textAlign: "center", marginTop: 14 }}>
+          <button onClick={() => { setMode(mode === "in" ? "up" : "in"); setMsg(null); }}
+            style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13.5 }}>
+            {mode === "in" ? "No account yet? Sign up" : "Already have an account? Sign in"}
+          </button>
         </div>
       </div>
     </div>
   );
 }
+
 
 /** What a spectator sees before the organiser has created anything. */
 function NotLive({ onUnlock }) {
@@ -2928,5 +2908,327 @@ function NotLive({ onUnlock }) {
         </Btn>
       </div>
     </div>
+  );
+}
+
+/* ================================================================== */
+/*  Shell — accounts, the list of tournaments, and what opens          */
+/* ================================================================== */
+
+const FORMAT_LABEL = { knockout: "Groups & knockout", tag: "Tag team", league: "League" };
+
+function SheetFrame({ title, onClose, children }) {
+  const swipeBack = useSwipeBack(onClose);
+  return (
+    <div className="bx" {...swipeBack} style={{
+      position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(null), overflowY: "auto",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
+      }}>
+        <button onClick={onClose} aria-label="Back"
+          style={{ background: "none", border: "none", color: C.ink, cursor: "pointer", display: "flex", padding: 4 }}>
+          <ArrowLeft size={20} />
+        </button>
+        <div className="bx-d" style={{ fontSize: 22, fontWeight: 800 }}>{title}</div>
+      </div>
+      <div style={{ padding: 16, maxWidth: 620, margin: "0 auto" }}>{children}</div>
+    </div>
+  );
+}
+
+function RefereeSheet({ event, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [email, setEmail] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () => eventReferees(event.id).then(setRows);
+  useEffect(() => { refresh(); }, [event.id]);
+
+  const add = async () => {
+    if (busy || !email.trim()) return;
+    setBusy(true); setMsg(null);
+    const { user, error } = await addReferee(event.id, email);
+    setBusy(false);
+    if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
+    setMsg({ tone: C.green, text: user.email + " can now run this tournament." });
+    setEmail("");
+    refresh();
+  };
+
+  return (
+    <SheetFrame title="Referees" onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 18, maxWidth: "58ch" }}>
+        A referee runs <strong style={{ color: C.ink }}>{event.name}</strong> — scores, the draw,
+        the bracket. They cannot rename it, delete it, or take it over, and that is enforced by
+        the database rather than by hiding the buttons.
+      </div>
+
+      <Block title="Add someone"
+        hint="They need an account already, and the address is the one they signed up with. Being a referee needs no approval.">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={inputStyle} type="email" value={email} placeholder="their@email.com"
+            onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+            onKeyDown={(e) => e.key === "Enter" && add()} />
+          <Btn onClick={add} tone="primary" disabled={busy} style={{ flexShrink: 0 }}>
+            <Plus size={16} />Add
+          </Btn>
+        </div>
+        {msg && <div style={{ color: msg.tone, fontSize: 13, marginTop: 9, lineHeight: 1.5 }}>{msg.text}</div>}
+      </Block>
+
+      {rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Nobody else has access yet.</div>
+      ) : rows.map((r) => (
+        <div key={r.userId} style={{ ...card, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name || r.email}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>{r.email}</div>
+          </div>
+          <Btn tone="danger" style={{ padding: "7px 11px" }}
+            onClick={async () => { await removeReferee(event.id, r.userId); refresh(); }}>
+            Remove
+          </Btn>
+        </div>
+      ))}
+    </SheetFrame>
+  );
+}
+
+function ApprovalsSheet({ onClose }) {
+  const [rows, setRows] = useState(null);
+  const refresh = () => pendingHosts().then(setRows);
+  useEffect(() => { refresh(); }, []);
+
+  return (
+    <SheetFrame title="Waiting to host" onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 18, maxWidth: "58ch" }}>
+        Approving lets someone create their own tournaments. It gives them no access to yours.
+      </div>
+      {rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Nobody is waiting.</div>
+      ) : rows.map((r) => (
+        <div key={r.id} style={{ ...card, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5 }}>{r.display_name || r.email}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>{r.email}</div>
+          </div>
+          <Btn tone="primary" style={{ padding: "7px 11px" }}
+            onClick={async () => { await approveHost(r.id, true); refresh(); }}>
+            <Check size={15} />Approve
+          </Btn>
+        </div>
+      ))}
+    </SheetFrame>
+  );
+}
+
+/** Everything this account can act on, and the way into a new one. */
+function TournamentList({ profile, events, onOpen, onNew, onSignOut, onApprovals }) {
+  const mine = events.filter((e) => e.role === "owner");
+  const reffed = events.filter((e) => e.role === "referee");
+
+  const Row = ({ e }) => (
+    <button onClick={() => onOpen(e)} style={{
+      width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+      background: C.surface, border: `1px solid ${C.line}`,
+      borderLeft: `3px solid ${e.archived ? C.line : C.magenta}`,
+      borderRadius: 3, padding: 13, marginBottom: 7, cursor: "pointer", color: C.ink,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="bx-d" style={{
+          fontSize: 17, fontWeight: 700, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{e.name}</div>
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+          {FORMAT_LABEL[e.format] || e.format}
+          {e.role === "referee" ? " · refereeing" : ""}
+          {e.archived ? " · archived" : ""}
+        </div>
+      </div>
+      <ChevronRight size={16} color={C.muted} />
+    </button>
+  );
+
+  return (
+    <div className="bx" style={{ ...shell, ...arenaStyle(null) }}>
+      <Style />
+      <div style={{ maxWidth: 620, margin: "0 auto", padding: "34px 16px 60px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 className="bx-d" style={{ fontSize: 34, fontWeight: 800, margin: 0, lineHeight: 1 }}>
+              Tournaments
+            </h1>
+            <div style={{ fontSize: 12.5, color: C.muted, marginTop: 5 }}>{profile ? profile.email : ""}</div>
+          </div>
+          {profile && profile.is_staff && (
+            <Btn onClick={onApprovals} tone="ghost" style={{ padding: "7px 11px" }}>
+              <Users size={15} />Approvals
+            </Btn>
+          )}
+          <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px" }}>Sign out</Btn>
+        </div>
+
+        {profile && profile.approved ? (
+          <Btn onClick={onNew} tone="primary"
+            style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 16, marginBottom: 22 }}>
+            <Plus size={17} />New tournament
+          </Btn>
+        ) : (
+          <div style={{
+            background: `${C.gold}14`, border: `1px solid ${C.gold}55`, borderRadius: 3,
+            padding: "13px 15px", marginBottom: 22, display: "flex", gap: 10,
+          }}>
+            <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ fontSize: 13.5, lineHeight: 1.55 }}>
+              This account is waiting to be approved for hosting. It can still be added as a
+              referee on somebody else&rsquo;s tournament meanwhile, and anything you referee
+              appears here.
+            </div>
+          </div>
+        )}
+
+        {events.length === 0 && (
+          <div style={{ ...card, textAlign: "center", padding: "40px 20px" }}>
+            <div className="bx-d" style={{ fontSize: 20, fontWeight: 700, marginBottom: 7 }}>Nothing here yet</div>
+            <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, maxWidth: "40ch", margin: "0 auto" }}>
+              {profile && profile.approved
+                ? "Start one, and it appears here with a link to share."
+                : "Once you are approved, or somebody adds you as a referee."}
+            </div>
+          </div>
+        )}
+
+        {mine.length > 0 && (
+          <div>
+            <div className="bx-d" style={{ fontSize: 14, color: C.muted, margin: "0 0 8px" }}>Yours</div>
+            {mine.map((e) => <Row key={e.id} e={e} />)}
+          </div>
+        )}
+        {reffed.length > 0 && (
+          <div>
+            <div className="bx-d" style={{ fontSize: 14, color: C.muted, margin: "18px 0 8px" }}>Refereeing</div>
+            {reffed.map((e) => <Row key={e.id} e={e} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Decides what you are looking at: a shared scoreboard, the sign-in, your list,
+ * or one tournament. A `?t=` link opens that tournament for anyone, signed in or
+ * not, which is what a spectator scanning a QR code needs.
+ */
+export default function App() {
+  const [session, setSession] = useState(undefined);   // undefined while unknown
+  const [profile, setProfile] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [openId, setOpenId] = useState(() => new URLSearchParams(location.search).get("t"));
+  const [making, setMaking] = useState(false);
+  const [sheet, setSheet] = useState(null);            // "referees" | "approvals"
+
+  useEffect(() => {
+    currentSession().then(setSession);
+    return onAuthChange(setSession);
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(null); setEvents([]); return; }
+    loadProfile().then(setProfile);
+    myEvents(session.user.id).then(setEvents);
+  }, [session]);
+
+  // The address bar is the navigation, so a tournament's link is shareable and
+  // the browser's own back button behaves.
+  useEffect(() => {
+    const onPop = () => setOpenId(new URLSearchParams(location.search).get("t"));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const openEvent = (id) => {
+    history.pushState({}, "", "?t=" + id);
+    setOpenId(id);
+  };
+  const backToList = () => {
+    history.pushState({}, "", location.pathname);
+    setOpenId(null);
+  };
+  const refreshEvents = () =>
+    session ? myEvents(session.user.id).then(setEvents) : Promise.resolve();
+
+  const open = events.find((e) => e.id === openId);
+
+  if (session === undefined) {
+    return (
+      <div className="bx" style={{ ...shell, display: "grid", placeItems: "center" }}>
+        <Style /><span style={{ color: C.muted }}>Loading…</span>
+      </div>
+    );
+  }
+
+  // A shared link opens the board for anyone. The controls are offered only
+  // where this account owns or referees it; the database decides the rest.
+  if (openId) {
+    return (
+      <>
+        <Board
+          eventId={openId}
+          canEdit={!!open}
+          isOwner={open ? open.role === "owner" : false}
+          onExit={session ? backToList : null}
+          onReferees={open && open.role === "owner" ? () => setSheet("referees") : null}
+          onDelete={async () => {
+            await deleteEvent(openId);
+            await refreshEvents();
+            backToList();
+          }}
+        />
+        {sheet === "referees" && open && (
+          <RefereeSheet event={open} onClose={() => setSheet(null)} />
+        )}
+      </>
+    );
+  }
+
+  if (!session) return <AuthScreen onDone={() => {}} />;
+
+  if (making) {
+    return (
+      <>
+        <Style />
+        <Setup onCreate={async (v) => {
+          const { row, error } = await createEvent({
+            name: v.name, format: v.format || "knockout", data: v,
+          });
+          setMaking(false);
+          if (error) { console.error(error); return; }
+          await refreshEvents();
+          if (row) openEvent(row.id);
+        }} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <TournamentList
+        profile={profile}
+        events={events}
+        onOpen={(e) => openEvent(e.id)}
+        onNew={() => setMaking(true)}
+        onApprovals={() => setSheet("approvals")}
+        onSignOut={async () => { await signOut(); setOpenId(null); }}
+      />
+      {sheet === "approvals" && <ApprovalsSheet onClose={() => setSheet(null)} />}
+    </>
   );
 }
