@@ -186,6 +186,19 @@ language sql stable security definer set search_path = public as $$
     and public.is_approved();
 $$;
 
+-- Who referees an event, with names. Owners cannot read other people's
+-- profiles directly and should not be able to, so the guard is inside: the
+-- list comes back only to the owner of that event.
+create or replace function public.event_referee_list(p_event uuid)
+returns table (user_id uuid, email text, display_name text, added_at timestamptz)
+language sql stable security definer set search_path = public as $$
+  select r.user_id, p.email, p.display_name, r.added_at
+  from event_referees r
+  join profiles p on p.id = r.user_id
+  where r.event_id = p_event and public.owns_event(p_event)
+  order by r.added_at;
+$$;
+
 -- Staff need the pending list to act on it.
 create or replace function public.pending_hosts()
 returns table (id uuid, email text, display_name text, created_at timestamptz)
