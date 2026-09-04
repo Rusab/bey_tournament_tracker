@@ -8,7 +8,7 @@ import { supabase } from "./lib/supabase.js";
 import {
   loadEvent, eventStamp, saveEvent, subscribeEvent,
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
-  myEvents, createEvent, archiveEvent, deleteEvent,
+  myEvents, publicEvents, createEvent, archiveEvent, deleteEvent,
   eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
 } from "./lib/db.js";
 
@@ -3181,7 +3181,7 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
  * account exists, unapproved, and can be added as a referee. Hosting waits
  * on approval, which is a staff action in the database.
  */
-function AuthScreen({ onDone }) {
+function AuthScreen({ onDone, onBack }) {
   const [mode, setMode] = useState("in");   // "in" | "up"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -3208,6 +3208,14 @@ function AuthScreen({ onDone }) {
     <div className="bx" style={{ ...shell, display: "grid", placeItems: "center", padding: 20 }}>
       <Style />
       <div style={{ width: "100%", maxWidth: 380 }}>
+        {onBack && (
+          <button onClick={onBack} className="bx-d" style={{
+            background: "none", border: "none", color: C.muted, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 6, padding: "0 0 14px", fontSize: 13.5,
+          }}>
+            <ArrowLeft size={15} />All tournaments
+          </button>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <span style={{ width: 30, height: 3, background: C.magenta, transform: "skewX(-30deg)" }} />
           <span className="bx-d" style={{ fontSize: 15, color: C.cyan, fontWeight: 700 }}>
@@ -3397,16 +3405,34 @@ function ApprovalsSheet({ onClose }) {
   );
 }
 
-/** Everything this account can act on, and the way into a new one. */
-function TournamentList({ profile, events, onOpen, onNew, onSignOut, onApprovals }) {
-  const mine = events.filter((e) => e.role === "owner");
-  const reffed = events.filter((e) => e.role === "referee");
 
-  const Row = ({ e }) => (
+/**
+ * The front door. Every live tournament, newest first, gathered under whoever
+ * runs it — a visitor arrives here and clicks straight through to a board,
+ * with no account and nothing to dismiss.
+ *
+ * Signing in is a button in the corner rather than a wall, because almost
+ * everyone who opens this is here to watch, not to score.
+ */
+function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals }) {
+  // Grouped by organiser, each group newest first, the groups themselves
+  // ordered by whoever started something most recently.
+  const groups = [];
+  const byOwner = new Map();
+  all.forEach((e) => {
+    if (!byOwner.has(e.owner_id)) {
+      const g = { owner: e.owner_id, organiser: e.organiser, events: [] };
+      byOwner.set(e.owner_id, g);
+      groups.push(g);
+    }
+    byOwner.get(e.owner_id).events.push(e);
+  });
+
+  const Row = ({ e, tag }) => (
     <button onClick={() => onOpen(e)} style={{
       width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
       background: C.surface, border: `1px solid ${C.line}`,
-      borderLeft: `3px solid ${e.archived ? C.line : C.magenta}`,
+      borderLeft: `3px solid ${C.magenta}`,
       borderRadius: 3, padding: 13, marginBottom: 7, cursor: "pointer", color: C.ink,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -3416,8 +3442,8 @@ function TournamentList({ profile, events, onOpen, onNew, onSignOut, onApprovals
         }}>{e.name}</div>
         <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
           {FORMAT_LABEL[e.format] || e.format}
-          {e.role === "referee" ? " · refereeing" : ""}
-          {e.archived ? " · archived" : ""}
+          {tag ? ` · ${tag}` : ""}
+          {e.created_at ? ` · ${new Date(e.created_at).toLocaleDateString()}` : ""}
         </div>
       </div>
       <ChevronRight size={16} color={C.muted} />
@@ -3427,68 +3453,99 @@ function TournamentList({ profile, events, onOpen, onNew, onSignOut, onApprovals
   return (
     <div className="bx" style={{ ...shell, ...arenaStyle(null) }}>
       <Style />
-      <div style={{ maxWidth: 620, margin: "0 auto", padding: "34px 16px 60px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22, flexWrap: "wrap" }}>
+      <div style={{ maxWidth: 620, margin: "0 auto", padding: "30px 16px 60px" }}>
+
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 24 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <h1 className="bx-d" style={{ fontSize: 34, fontWeight: 800, margin: 0, lineHeight: 1 }}>
-              Tournaments
-            </h1>
-            <div style={{ fontSize: 12.5, color: C.muted, marginTop: 5 }}>{profile ? profile.email : ""}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ width: 26, height: 3, background: C.magenta, transform: "skewX(-30deg)" }} />
+              <span className="bx-d" style={{ fontSize: 13.5, color: C.cyan, fontWeight: 700 }}>
+                Beyblade X
+              </span>
+            </div>
+            <h1 className="bx-d" style={{
+              fontSize: 36, fontWeight: 800, margin: 0, lineHeight: .95,
+              background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 55%, ${C.cyan} 100%)`,
+              WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+            }}>Tournaments</h1>
           </div>
-          {profile && profile.is_staff && (
-            <Btn onClick={onApprovals} tone="ghost" style={{ padding: "7px 11px" }}>
-              <Users size={15} />Approvals
+
+          {profile ? (
+            <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
+              <Unlock size={14} /><span className="bx-role-label">Sign out</span>
+            </Btn>
+          ) : (
+            <Btn onClick={onSignIn} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
+              <Lock size={14} /><span className="bx-role-label">Sign in</span>
             </Btn>
           )}
-          <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px" }}>Sign out</Btn>
         </div>
 
-        {profile && profile.approved ? (
-          <Btn onClick={onNew} tone="primary"
-            style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 16, marginBottom: 22 }}>
-            <Plus size={17} />New tournament
-          </Btn>
-        ) : (
-          <div style={{
-            background: `${C.gold}14`, border: `1px solid ${C.gold}55`, borderRadius: 3,
-            padding: "13px 15px", marginBottom: 22, display: "flex", gap: 10,
-          }}>
-            <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
-            <div style={{ fontSize: 13.5, lineHeight: 1.55 }}>
-              This account is waiting to be approved for hosting. It can still be added as a
-              referee on somebody else&rsquo;s tournament meanwhile, and anything you referee
-              appears here.
+        {profile && (
+          <div style={{ marginBottom: 26 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+              <span className="bx-d" style={{ fontSize: 14, color: C.muted }}>
+                Yours · {profile.email}
+              </span>
+              {profile.is_staff && (
+                <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
+                  Approvals
+                </Btn>
+              )}
             </div>
+
+            {profile.approved ? (
+              <Btn onClick={onNew} tone="primary"
+                style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5, marginBottom: 10 }}>
+                <Plus size={16} />New tournament
+              </Btn>
+            ) : (
+              <div style={{
+                background: `${C.gold}14`, border: `1px solid ${C.gold}55`, borderRadius: 3,
+                padding: "12px 14px", marginBottom: 10, display: "flex", gap: 10,
+              }}>
+                <AlertTriangle size={16} color={C.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                  This account is waiting to be approved for hosting. It can still be added as a
+                  referee meanwhile.
+                </div>
+              </div>
+            )}
+
+            {mine.map((e) => (
+              <Row key={e.id} e={e} tag={e.role === "referee" ? "refereeing" : "yours"} />
+            ))}
           </div>
         )}
 
-        {events.length === 0 && (
+        {all.length === 0 ? (
           <div style={{ ...card, textAlign: "center", padding: "40px 20px" }}>
-            <div className="bx-d" style={{ fontSize: 20, fontWeight: 700, marginBottom: 7 }}>Nothing here yet</div>
+            <div className="bx-d" style={{ fontSize: 20, fontWeight: 700, marginBottom: 7 }}>
+              Nothing running yet
+            </div>
             <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, maxWidth: "40ch", margin: "0 auto" }}>
-              {profile && profile.approved
-                ? "Start one, and it appears here with a link to share."
-                : "Once you are approved, or somebody adds you as a referee."}
+              Tournaments appear here as organisers start them.
             </div>
           </div>
-        )}
-
-        {mine.length > 0 && (
-          <div>
-            <div className="bx-d" style={{ fontSize: 14, color: C.muted, margin: "0 0 8px" }}>Yours</div>
-            {mine.map((e) => <Row key={e.id} e={e} />)}
-          </div>
-        )}
-        {reffed.length > 0 && (
-          <div>
-            <div className="bx-d" style={{ fontSize: 14, color: C.muted, margin: "18px 0 8px" }}>Refereeing</div>
-            {reffed.map((e) => <Row key={e.id} e={e} />)}
-          </div>
+        ) : (
+          groups.map((g) => (
+            <div key={g.owner} style={{ marginBottom: 22 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <Blade color={C.cyan} h={14} />
+                <span className="bx-d" style={{ fontSize: 15, fontWeight: 700 }}>{g.organiser}</span>
+                <span style={{ fontSize: 12, color: C.muted }}>
+                  {g.events.length} tournament{g.events.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              {g.events.map((e) => <Row key={e.id} e={e} />)}
+            </div>
+          ))
         )}
       </div>
     </div>
   );
 }
+
 
 /**
  * Decides what you are looking at: a shared scoreboard, the sign-in, your list,
@@ -3502,16 +3559,23 @@ export default function App() {
   const [openId, setOpenId] = useState(() => new URLSearchParams(location.search).get("t"));
   const [making, setMaking] = useState(false);
   const [sheet, setSheet] = useState(null);            // "referees" | "approvals"
+  const [directory, setDirectory] = useState([]);      // every live tournament
+  const [signingIn, setSigningIn] = useState(false);
 
   useEffect(() => {
     currentSession().then(setSession);
     return onAuthChange(setSession);
   }, []);
 
+  // The directory is public, so it loads for everyone and does not wait on a
+  // session that most visitors will never have.
+  useEffect(() => { publicEvents().then(setDirectory); }, []);
+
   useEffect(() => {
     if (!session) { setProfile(null); setEvents([]); return; }
     loadProfile(session.user.id).then(setProfile);
     myEvents(session.user.id).then(setEvents);
+    setSigningIn(false);
   }, [session]);
 
   // The address bar is the navigation, so a tournament's link is shareable and
@@ -3530,8 +3594,10 @@ export default function App() {
     history.pushState({}, "", location.pathname);
     setOpenId(null);
   };
-  const refreshEvents = () =>
-    session ? myEvents(session.user.id).then(setEvents) : Promise.resolve();
+  const refreshEvents = async () => {
+    publicEvents().then(setDirectory);
+    if (session) await myEvents(session.user.id).then(setEvents);
+  };
 
   const open = events.find((e) => e.id === openId);
 
@@ -3552,7 +3618,7 @@ export default function App() {
           eventId={openId}
           canEdit={!!open}
           isOwner={open ? open.role === "owner" : false}
-          onExit={session ? backToList : null}
+          onExit={backToList}
           onReferees={open && open.role === "owner" ? () => setSheet("referees") : null}
           onDelete={async () => {
             await deleteEvent(openId);
@@ -3567,7 +3633,9 @@ export default function App() {
     );
   }
 
-  if (!session) return <AuthScreen onDone={() => {}} />;
+  if (signingIn && !session) {
+    return <AuthScreen onDone={() => setSigningIn(false)} onBack={() => setSigningIn(false)} />;
+  }
 
   if (making) {
     return (
@@ -3588,12 +3656,14 @@ export default function App() {
 
   return (
     <>
-      <TournamentList
+      <Directory
         profile={profile}
-        events={events}
+        mine={events}
+        all={directory}
         onOpen={(e) => openEvent(e.id)}
         onNew={() => setMaking(true)}
         onApprovals={() => setSheet("approvals")}
+        onSignIn={() => setSigningIn(true)}
         onSignOut={async () => { await signOut(); setOpenId(null); }}
       />
       {sheet === "approvals" && <ApprovalsSheet onClose={() => setSheet(null)} />}

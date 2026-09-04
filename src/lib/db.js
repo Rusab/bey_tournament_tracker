@@ -86,6 +86,16 @@ export async function myEvents(userId) {
 
 const withRole = (role) => (e) => ({ ...e, role });
 
+/**
+ * Every live tournament, with the name of whoever runs it — the front door,
+ * open to anyone. Archived ones are left out.
+ */
+export async function publicEvents() {
+  const { data, error } = await supabase.rpc("public_events");
+  if (error) { console.error(error); return []; }
+  return data || [];
+}
+
 /** The whole tournament. Readable by anyone — a spectator needs no account. */
 export async function loadEvent(id) {
   const { data, error } = await supabase

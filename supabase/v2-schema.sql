@@ -199,6 +199,24 @@ language sql stable security definer set search_path = public as $$
   order by r.added_at;
 $$;
 
+-- The public directory: every live tournament with the name of whoever runs
+-- it. Definer because profiles are not readable by a visitor and should not
+-- be — this hands back display names and never email addresses.
+create or replace function public.public_events()
+returns table (
+  id uuid, name text, format text, owner_id uuid,
+  organiser text, created_at timestamptz, updated_at timestamptz
+)
+language sql stable security definer set search_path = public as $$
+  select e.id, e.name, e.format, e.owner_id,
+         coalesce(nullif(trim(p.display_name), ''), 'Organiser'),
+         e.created_at, e.updated_at
+  from events e
+  left join profiles p on p.id = e.owner_id
+  where not e.archived
+  order by e.created_at desc;
+$$;
+
 -- Staff need the pending list to act on it.
 create or replace function public.pending_hosts()
 returns table (id uuid, email text, display_name text, created_at timestamptz)
