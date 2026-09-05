@@ -2096,7 +2096,8 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
                 color: done === ms.length ? C.green : C.muted,
               }}>{done}/{ms.length} played</span>
             </div>
-            {ms.map((m) => <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} onClick={() => onScore(m.id)} />)}
+            {ms.map((m) => <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin}
+              bestOf={bestOfFor(m, t)} onClick={() => onScore(m.id)} />)}
           </div>
         );
       })}
@@ -2105,13 +2106,19 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
 }
 
 /** byePossible: only the opening round, where an empty slot really is a bye. */
-function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
+function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf }) {
   const { s1, s2 } = scoreOf(m);
   const w = winnerOf(m);
   const both = m.p1 && m.p2 && !locked;
-  // A match played over sets shows how many each side took. On its own that
-  // reads exactly like a points score, so the sets themselves go underneath.
-  const sets = m.sets && m.sets.length ? m.sets : null;
+  /*
+   * A match played over sets shows how many each side took, which on its own
+   * reads exactly like a points score. Underneath it gets one box per set the
+   * match could have run to — a best of three shows three, and the third
+   * stays empty when two straight sets settled it, which is the point: the
+   * shape of the match is visible without reading anything.
+   */
+  const slots = Math.max(1, bestOf || 1);
+  const sets = slots > 1 && m.sets && m.sets.length ? m.sets : null;
   return (
     <button onClick={both ? onClick : undefined} disabled={!both}
       style={{
@@ -2140,10 +2147,26 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
       </div>
       {sets && (
         <div style={{
-          fontSize: 11.5, color: C.muted, textAlign: "center", marginTop: 6,
-          paddingTop: 6, borderTop: `1px solid ${C.line}66`,
+          display: "grid", gap: 4, marginTop: 8,
+          gridTemplateColumns: `repeat(${slots}, 1fr)`,
         }}>
-          sets · {sets.map((x) => `${x.s1}–${x.s2}`).join("   ")}
+          {Array.from({ length: slots }, (_, i) => {
+            const st = sets[i];
+            const to1 = st && st.s1 > st.s2;
+            const col = !st ? C.muted : to1 ? C.magenta : C.cyan;
+            return (
+              <div key={i} style={{
+                borderRadius: 3, padding: "5px 4px", textAlign: "center",
+                border: `1px solid ${st ? col + "55" : C.line}`,
+                background: st ? `${col}14` : "transparent",
+              }}>
+                <div style={{ fontSize: 10, color: C.muted, letterSpacing: .3 }}>Set {i + 1}</div>
+                <div className="bx-d" style={{
+                  fontSize: 14, fontWeight: 700, color: st ? col : C.line, marginTop: 1,
+                }}>{st ? `${st.s1}–${st.s2}` : "–"}</div>
+              </div>
+            );
+          })}
         </div>
       )}
     </button>
@@ -2395,7 +2418,7 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
             </div>
             {r.map((m, i) => (
               <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} byePossible={ri === 0}
-                onClick={() => onScore(m.id)} label={`M${i + 1}`} />
+                bestOf={bestOfFor(m, t)} onClick={() => onScore(m.id)} label={`M${i + 1}`} />
             ))}
           </div>
         );
@@ -2410,7 +2433,8 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
               {stageLine(t, "third")}
             </span>
           </div>
-          <MatchRow m={t.bracket.third} nameOf={nameOf} locked={!isAdmin} onClick={() => onScore(t.bracket.third.id)} />
+          <MatchRow m={t.bracket.third} nameOf={nameOf} locked={!isAdmin}
+            bestOf={bestOfFor(t.bracket.third, t)} onClick={() => onScore(t.bracket.third.id)} />
         </div>
       )}
     </div>
