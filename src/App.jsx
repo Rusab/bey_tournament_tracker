@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
@@ -298,6 +298,37 @@ const targetFor = (m, t) => t.points[stageOf(m, t)] ?? t.points.group;
 const defaultBestOf = () => ({ group: 1, r16: 1, qf: 1, sf: 1, final: 1, third: 1 });
 const bestOfFor = (m, t) => Math.max(1, (t.bestOf && t.bestOf[stageOf(m, t)]) || 1);
 const setsToWin = (bestOf) => Math.floor(bestOf / 2) + 1;
+
+/**
+ * How a stage is played, in words. A round headed "first to 7" while its one
+ * match reads 2-0 looks like a single set that ended 2-0, so a stage played
+ * over sets has to say so where the score is read.
+ */
+function stageLine(t, key) {
+  const n = Math.max(1, (t.bestOf && t.bestOf[key]) || 1);
+  const pts = t.points[key];
+  return n > 1 ? `best of ${n}, sets of ${pts}` : `first to ${pts}`;
+}
+
+/**
+ * Which set each finish landed in — the same replay as splitSets, keeping the
+ * set number rather than the score, so a match log can be broken up by set.
+ */
+function setIndexOf(events, target, bestOf) {
+  const need = setsToWin(bestOf);
+  const out = [];
+  let cur = { s1: 0, s2: 0 }, w1 = 0, w2 = 0, at = 0;
+  for (const e of events || []) {
+    out.push(at);
+    if (w1 >= need || w2 >= need) continue;
+    if (e.side === 1) cur.s1 += e.pts; else cur.s2 += e.pts;
+    if (cur.s1 >= target || cur.s2 >= target) {
+      if (cur.s1 > cur.s2) w1++; else if (cur.s2 > cur.s1) w2++;
+      cur = { s1: 0, s2: 0 }; at++;
+    }
+  }
+  return out;
+}
 
 /** Sets each side took, from the summary stored on a finished match. */
 function setWins(m) {
@@ -2044,8 +2075,8 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
     <div>
       <SectionHead title={isLeague(t) ? "Fixtures" : "Group matches"}
         sub={(isLeague(t)
-          ? `Everyone plays everyone once, first to ${t.points.group}.`
-          : `Everyone plays everyone in their group, first to ${t.points.group}.`)
+          ? `Everyone plays everyone once, ${stageLine(t, "group")}.`
+          : `Everyone plays everyone in their group, ${stageLine(t, "group")}.`)
           + (isAdmin ? " Tap a match to score it." : "")} />
       <GroupPicker t={t} value={group} onChange={setGroup} />
       {/* Indexed over every group, not the filtered set, so each keeps its colour. */}
@@ -2078,15 +2109,19 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
   const { s1, s2 } = scoreOf(m);
   const w = winnerOf(m);
   const both = m.p1 && m.p2 && !locked;
+  // A match played over sets shows how many each side took. On its own that
+  // reads exactly like a points score, so the sets themselves go underneath.
+  const sets = m.sets && m.sets.length ? m.sets : null;
   return (
     <button onClick={both ? onClick : undefined} disabled={!both}
       style={{
-        width: "100%", display: "flex", alignItems: "center", gap: 10,
+        width: "100%", display: "block",
         background: C.surface, border: `1px solid ${C.line}`,
         borderLeft: `3px solid ${m.done ? C.green : C.raised}`,
         borderRadius: 3, padding: "12px", marginBottom: 6,
         cursor: both ? "pointer" : "default", textAlign: "left", color: C.ink,
       }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
       {label && <span className="bx-d" style={{ fontSize: 12, color: C.muted, width: 28, flexShrink: 0 }}>{label}</span>}
       <span style={{
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
@@ -2102,6 +2137,15 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible }) {
         whiteSpace: "nowrap", textAlign: "right", fontWeight: w === m.p2 ? 700 : 400,
         color: m.p2 ? (w === m.p2 ? C.cyan : C.ink) : C.muted,
       }}>{m.p2 ? nameOf(m.p2) : (m.p1 && byePossible ? "Bye" : "TBD")}</span>
+      </div>
+      {sets && (
+        <div style={{
+          fontSize: 11.5, color: C.muted, textAlign: "center", marginTop: 6,
+          paddingTop: 6, borderTop: `1px solid ${C.line}66`,
+        }}>
+          sets · {sets.map((x) => `${x.s1}–${x.s2}`).join("   ")}
+        </div>
+      )}
     </button>
   );
 }
@@ -2346,7 +2390,7 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
               <Blade color={C.gold} h={17} />
               <span className="bx-d" style={{ fontSize: 18, fontWeight: 700 }}>{roundName(teams)}</span>
               <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
-                first to {t.points[stageKeyForTeams(teams)]}
+                {stageLine(t, stageKeyForTeams(teams))}
               </span>
             </div>
             {r.map((m, i) => (
@@ -2363,7 +2407,7 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
             <Blade color="#C87941" h={17} />
             <span className="bx-d" style={{ fontSize: 18, fontWeight: 700 }}>Third place</span>
             <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
-              first to {t.points.third}
+              {stageLine(t, "third")}
             </span>
           </div>
           <MatchRow m={t.bracket.third} nameOf={nameOf} locked={!isAdmin} onClick={() => onScore(t.bracket.third.id)} />
@@ -2684,10 +2728,15 @@ function playerStats(pid, allMatches, t) {
     });
     const key = stageOf(m, t);
     const label = (stagesFor(t.koSize, t.thirdPlace).find((s) => s.key === key) || {}).label || "Match";
+    const setAt = setIndexOf(m.events, targetFor(m, t), bestOfFor(m, t));
     st.log.push({
       id: m.id, opp: me === 1 ? m.p2 : m.p1, my, oppScore: opp, won, stage: label,
-      // Every point of the match in the order it was scored, from this blader's side.
-      sequence: (m.events || []).map((e) => ({ type: e.type, pts: e.pts, mine: e.side === me })),
+      sets: (m.sets || []).map((x) => (me === 1 ? { s1: x.s1, s2: x.s2 } : { s1: x.s2, s2: x.s1 })),
+      // Every point of the match in the order it was scored, from this blader's
+      // side, tagged with the set it fell in.
+      sequence: (m.events || []).map((e, i) => ({
+        type: e.type, pts: e.pts, mine: e.side === me, set: setAt[i] || 0,
+      })),
     });
   });
   return st;
@@ -2819,6 +2868,13 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
                     {r.my}–{r.oppScore}
                   </span>
                 </div>
+                {r.sets.length > 0 && (
+                  <div style={{ fontSize: 11.5, color: C.muted, marginTop: 5 }}>
+                    {r.sets.map((x) => `${x.s1}–${x.s2}`).join("   ")}
+                    {"   ·   "}
+                    {r.sets.filter((x) => x.s1 > x.s2).length}–{r.sets.filter((x) => x.s2 > x.s1).length} in sets
+                  </div>
+                )}
                 {r.sequence.length > 0 && (
                   <div style={{
                     display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10,
@@ -2827,14 +2883,23 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
                     {r.sequence.map((e, i) => {
                       const a = awardOf(e.type);
                       const col = e.mine ? C.green : C.magenta;
+                      const opens = r.sets.length > 1 && (i === 0 || r.sequence[i - 1].set !== e.set);
                       return (
-                        <span key={i} style={{
+                        <Fragment key={i}>
+                        {opens && (
+                          <span style={{
+                            flexBasis: "100%", fontSize: 11, color: C.muted,
+                            marginTop: i === 0 ? 0 : 5,
+                          }}>Set {e.set + 1}</span>
+                        )}
+                        <span style={{
                           fontSize: 11.5, padding: "3px 7px", borderRadius: 3,
                           background: `${col}16`, color: col, border: `1px solid ${col}44`,
                           borderStyle: e.type === PENALTY.key ? "dashed" : "solid", whiteSpace: "nowrap",
                         }}>
                           {i + 1}. {(a || { label: e.type }).label} +{e.pts}
                         </span>
+                        </Fragment>
                       );
                     })}
                   </div>
