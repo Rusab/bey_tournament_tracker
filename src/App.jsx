@@ -557,16 +557,71 @@ const csvCell = (v) => {
 };
 const csvRow = (cells) => cells.map(csvCell).join(",");
 
+/** Group fixtures, bracket and third-place playoff, as one list. */
+const everyMatch = (t) => [
+  ...t.groupMatches,
+  ...(t.bracket ? t.bracket.rounds.flat() : []),
+  ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
+].filter((m) => m.p1 || m.p2);
+
+/**
+ * Every match as CSV rows, header first, played or not. Shared by both
+ * exports, so a result reads identically whichever one produced it.
+ */
+function matchCSVRows(t) {
+  const nameOf = (id) => (t.players.find((p) => p.id === id) || {}).name || "—";
+  const groupName = (id) => (t.groups.find((g) => g.id === id) || {}).name || "";
+  const stageLabel = (key) =>
+    (stagesFor(t.koSize, t.thirdPlace).find((x) => x.key === key) || {}).label || key;
+
+  const out = [csvRow(["Stage", "Group", "Blader A", "Blader B", "Score A", "Score B",
+    "Sets", "Winner", "Points in order"])];
+
+  everyMatch(t).forEach((m) => {
+    const { s1, s2 } = scoreOf(m);
+    const w = winnerOf(m);
+    const seq = (m.events || [])
+      .map((e, i) => `${i + 1}. ${nameOf(e.side === 1 ? m.p1 : m.p2)} ${(awardOf(e.type) || { label: e.type }).label} +${e.pts}`)
+      .join("; ");
+    // Score A and B stay the points across the whole match; the set column
+    // carries what actually decided it, so neither reading is lost.
+    const sets = (m.sets || []).map((x) => `${x.s1}-${x.s2}`).join(" ");
+    out.push(csvRow([
+      stageLabel(stageOf(m, t)), groupName(m.groupId),
+      m.p1 ? nameOf(m.p1) : "", m.p2 ? nameOf(m.p2) : "",
+      m.done ? s1 : "", m.done ? s2 : "",
+      sets,
+      w ? nameOf(w) : (m.done ? "draw" : "not played"),
+      seq,
+    ]));
+  });
+  return out;
+}
+
+/**
+ * The results on their own, at any point in the tournament. Matches still to
+ * come are listed rather than left out, so the file says what is outstanding
+ * as well as what has happened.
+ */
+function buildMatchesCSV(t) {
+  const all = everyMatch(t);
+  const played = all.filter((m) => m.done).length;
+
+  const out = [];
+  out.push(csvRow([t.name, "match results"]));
+  out.push(csvRow(["Generated", new Date().toISOString()]));
+  out.push(csvRow(["Played", `${played} of ${all.length}`]));
+  out.push("");
+  out.push(csvRow(["MATCHES"]));
+  matchCSVRows(t).forEach((r) => out.push(r));
+  return out.join("\n");
+}
+
 /**
  * The whole tournament as one file: the ranking, how it was arrived at, and
  * every match point by point, so the record survives the app.
  */
 function buildFinalCSV(t, cfg, rows, kings) {
-  const nameOf = (id) => (t.players.find((p) => p.id === id) || {}).name || "—";
-  const groupName = (id) => (t.groups.find((g) => g.id === id) || {}).name || "";
-  const stageLabel = (key) =>
-    (stagesFor(t.koSize, t.thirdPlace).find((s) => s.key === key) || {}).label || key;
-
   const out = [];
   out.push(csvRow([t.name, "final standings"]));
   out.push(csvRow(["Generated", new Date().toISOString()]));
@@ -595,33 +650,7 @@ function buildFinalCSV(t, cfg, rows, kings) {
   out.push("");
 
   out.push(csvRow(["MATCHES"]));
-  out.push(csvRow(["Stage", "Group", "Blader A", "Blader B", "Score A", "Score B",
-    "Sets", "Winner", "Points in order"]));
-
-  const all = [
-    ...t.groupMatches,
-    ...(t.bracket ? t.bracket.rounds.flat() : []),
-    ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
-  ];
-  all.forEach((m) => {
-    if (!m.p1 && !m.p2) return;
-    const { s1, s2 } = scoreOf(m);
-    const w = winnerOf(m);
-    const seq = (m.events || [])
-      .map((e, i) => `${i + 1}. ${nameOf(e.side === 1 ? m.p1 : m.p2)} ${(awardOf(e.type) || { label: e.type }).label} +${e.pts}`)
-      .join("; ");
-    // Score A and B stay the points across the whole match; the set column
-    // carries what actually decided it, so neither reading is lost.
-    const sets = (m.sets || []).map((x) => `${x.s1}-${x.s2}`).join(" ");
-    out.push(csvRow([
-      stageLabel(stageOf(m, t)), groupName(m.groupId),
-      m.p1 ? nameOf(m.p1) : "", m.p2 ? nameOf(m.p2) : "",
-      m.done ? s1 : "", m.done ? s2 : "",
-      sets,
-      w ? nameOf(w) : (m.done ? "draw" : "not played"),
-      seq,
-    ]));
-  });
+  matchCSVRows(t).forEach((r) => out.push(r));
 
   return out.join("\n");
 }
@@ -2192,6 +2221,8 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf }) {
 
 function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFinal }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
+  const everything = everyMatch(t);
+  const playedCount = everything.filter((m) => m.done).length;
   const [ask, setAsk] = useState(false);
 
   const makeBracket = () => {
@@ -2346,6 +2377,23 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
           <Btn onClick={onFinal} tone="primary"><Medal size={15} />Generate final standings</Btn>
         </div>
       )}
+
+      {/* Not gated on the tournament being finished, and not on being an
+          admin: taking the results away mid-run is the whole point, and a
+          spectator wanting the numbers costs nobody anything. */}
+      <div style={{ ...card, marginTop: 14 }}>
+        <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>
+          Match results
+        </div>
+        <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "58ch" }}>
+          Every match as it stands — {playedCount} of {everything.length} played — with the
+          score, the sets, the winner, and every point in the order it was scored.
+          Matches still to come are listed too.
+        </div>
+        <Btn onClick={() => downloadCSV(`${slug(t.name)}-match-results.csv`, buildMatchesCSV(t))}>
+          <Download size={15} />Download match results
+        </Btn>
+      </div>
 
       {ask && (
         <Confirm
