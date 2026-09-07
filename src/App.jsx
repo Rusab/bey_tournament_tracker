@@ -806,9 +806,9 @@ const Style = () => (
     .bx-enter { animation: bx-clash .5s cubic-bezier(.16,1,.3,1) both; }
     /* Tab changes slide in from the side you came from, so a swipe feels
        connected to the thing it moved. */
-    @keyframes bx-tab-next { from { opacity: 0; transform: translate3d(26px,0,0); }
+    @keyframes bx-tab-next { from { opacity: 0; transform: translate3d(16px,0,0); }
                              to   { opacity: 1; transform: translate3d(0,0,0); } }
-    @keyframes bx-tab-prev { from { opacity: 0; transform: translate3d(-26px,0,0); }
+    @keyframes bx-tab-prev { from { opacity: 0; transform: translate3d(-16px,0,0); }
                              to   { opacity: 1; transform: translate3d(0,0,0); } }
     /* No fill-mode on purpose. "both" would leave the end transform applied
        forever, and a transformed ancestor becomes the containing block for any
@@ -829,6 +829,16 @@ const Style = () => (
     @media (prefers-reduced-motion: reduce) { .bx *, .bx-enter { animation: none !important; transition: none !important; } }
   `}</style>
 );
+
+/*
+ * iOS runs a home-screen app under the status bar: the page asks for that with
+ * viewport-fit=cover and a translucent bar, and gets the clock and battery
+ * drawn over whatever sits at the top of the screen — including, until now,
+ * the sign-in button. Anything pinned to the top edge has to hold itself off
+ * by the inset the device reports. In a browser tab that inset is zero and
+ * nothing moves, which is why this only ever showed up once installed.
+ */
+const safeTop = (extra) => `calc(env(safe-area-inset-top) + ${extra})`;
 
 const shell = { ...arenaStyle(null), color: C.ink, minHeight: "100vh" };
 
@@ -1273,6 +1283,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       <header style={{
         position: "sticky", top: 0, zIndex: 20, background: C.base,
         borderBottom: `1px solid ${C.line}`, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         display: "flex", alignItems: "center", gap: 12,
       }}>
         {t.logoUrl && (
@@ -1618,7 +1629,9 @@ function Setup({ onCreate }) {
 
   return (
     <div className="bx" style={{ ...shell, ...arenaStyle(bgUrl) }}>
-      <div style={{ maxWidth: 620, margin: "0 auto", padding: "44px 18px 70px" }}>
+      <div style={{
+        maxWidth: 620, margin: "0 auto", padding: "44px 18px 70px", paddingTop: safeTop("44px"),
+      }}>
 
         <div className="bx-enter" style={{ marginBottom: 30 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
@@ -2004,7 +2017,7 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
 
       {isAdmin && moving && (
         <div style={{
-          position: "sticky", top: 70, zIndex: 15, background: C.raised,
+          position: "sticky", top: safeTop("70px"), zIndex: 15, background: C.raised,
           border: `1px solid ${C.magenta}`, borderRadius: 4, padding: 12, marginBottom: 14,
         }}>
           <div style={{ fontSize: 13.5, marginBottom: 9 }}>
@@ -2565,6 +2578,7 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
         <button onClick={tryClose} aria-label="Back"
@@ -2816,6 +2830,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
         <button onClick={onClose} aria-label="Back"
@@ -3010,6 +3025,7 @@ function FinalStandingsSheet({ t, onClose }) {
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
         <button onClick={onClose} aria-label="Back"
@@ -3136,6 +3152,7 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
         <button onClick={onClose} aria-label="Back"
@@ -3294,7 +3311,9 @@ function AuthScreen({ onDone, onBack }) {
   };
 
   return (
-    <div className="bx" style={{ ...shell, display: "grid", placeItems: "center", padding: 20 }}>
+    <div className="bx" style={{
+      ...shell, display: "grid", placeItems: "center", padding: 20, paddingTop: safeTop("20px"),
+    }}>
       <Style />
       <div style={{ width: "100%", maxWidth: 380 }}>
         {onBack && (
@@ -3390,6 +3409,7 @@ function SheetFrame({ title, onClose, children }) {
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+        paddingTop: safeTop("13px"),
         borderBottom: `1px solid ${C.line}`, position: "sticky", top: 0, background: C.base, zIndex: 2,
       }}>
         <button onClick={onClose} aria-label="Back"
@@ -3563,7 +3583,9 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
   return (
     <div className="bx" style={{ ...shell, ...arenaStyle(null) }}>
       <Style />
-      <div style={{ maxWidth: 620, margin: "0 auto", padding: "30px 16px 60px" }}>
+      <div style={{
+        maxWidth: 620, margin: "0 auto", padding: "30px 16px 60px", paddingTop: safeTop("30px"),
+      }}>
 
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 24 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
