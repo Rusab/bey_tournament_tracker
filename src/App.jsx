@@ -1627,7 +1627,7 @@ function StagePoints({ koSize, thirdPlace, points, onChange, bestOf, onBestOf })
             <Segmented
               value={points[s.key]}
               onChange={(v) => onChange({ ...points, [s.key]: v })}
-              options={[3, 4, 5, 7, 9].map((x) => ({ value: x, label: String(x) }))}
+              options={[3, 4, 5, 7, 9, 10].map((x) => ({ value: x, label: String(x) }))}
               tone={tone}
             />
             {onBestOf && (
@@ -1874,7 +1874,7 @@ function Setup({ onCreate }) {
               hint="Every fixture runs to this target. A finish that would overshoot is capped.">
               <Segmented value={points.group}
                 onChange={(v) => setPoints((p) => ({ ...p, group: v }))}
-                options={[3, 4, 5, 7, 9].map((n) => ({ value: n, label: String(n) }))} />
+                options={[3, 4, 5, 7, 9, 10].map((n) => ({ value: n, label: String(n) }))} />
             </Field>
           </>
         ) : (
