@@ -746,10 +746,30 @@ const slug = (s) => (s || "tournament").toLowerCase().replace(/[^a-z0-9]+/g, "-"
 function seedOrder(n, entrants) {
   const half = n / 2;
   const byes = Math.max(0, Math.min(half, n - (entrants == null ? n : entrants)));
-  const out = [];
-  for (let i = 1; i <= byes; i++) { out.push(i); out.push(null); }
-  for (let k = 1; k <= half - byes; k++) { out.push(byes + k); out.push(half + k); }
-  return out;
+
+  // Pair j: the j-th seed of the top half against the j-th of the bottom,
+  // with the byes taken off the top before the halves are cut.
+  const pair = (j) => [j, j <= byes ? null : half + (j - byes)];
+
+  return bracketOrder(half).flatMap(pair);
+}
+
+/**
+ * Where each pair sits in the tree, which is a separate question from who is
+ * in it. Semi-finals are fed by the first two matches and the last two, so
+ * listing the pairs 1, 2, 3, 4 would put the top two seeds in the same half
+ * and have them meet a round early. The classic walk — first, last, and
+ * inwards — is what keeps them apart until the final.
+ */
+function bracketOrder(m) {
+  let arr = [1];
+  while (arr.length < m) {
+    const len = arr.length * 2 + 1;
+    const out = [];
+    arr.forEach((s) => { out.push(s); out.push(len - s); });
+    arr = out;
+  }
+  return arr;
 }
 
 function roundName(teams) {
