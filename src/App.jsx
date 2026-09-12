@@ -751,9 +751,27 @@ function seedOrder(n, entrants) {
   // with the byes taken off the top before the halves are cut.
   const pair = (j) => [j, j <= byes ? null : half + (j - byes)];
 
-  const out = [];
-  for (let j = 1; j <= half; j++) out.push(...pair(j));
-  return out;
+  return bracketOrder(half).flatMap(pair);
+}
+
+/**
+ * Where each pair is listed. Asked for: first, last, and inwards — so a round
+ * of four reads 1 v 5, 4 v 8, 2 v 6, 3 v 7 rather than 1, 2, 3, 4.
+ *
+ * Note this is the organiser's layout, and it is not the one that keeps the
+ * top seeds apart. Paired with the round wiring below, which sends match 1
+ * against match 3, the two best seeds meet in the semi-final rather than the
+ * final. That is the arrangement that was asked for.
+ */
+function bracketOrder(m) {
+  let arr = [1];
+  while (arr.length < m) {
+    const len = arr.length * 2 + 1;
+    const out = [];
+    arr.forEach((s) => { out.push(s); out.push(len - s); });
+    arr = out;
+  }
+  return arr;
 }
 
 function roundName(teams) {
@@ -838,14 +856,9 @@ function propagate(bracket) {
   });
 
   /*
-   * Every round is split down the middle, the same way the first one was
-   * seeded: the top half of a round plays the bottom half of it, in order.
-   * Match 1 meets match 3 and match 2 meets match 4 of a round of four — not
-   * 1 with 2 and 3 with 4, which would put the two best seeds in the same
-   * half and have them meet a round early.
-   *
-   * So the rule reads the same at every stage: 1 v 3 and 2 v 4, all the way
-   * down to the final.
+   * Every round is split down the middle: the top half of a round plays the
+   * bottom half of it, in order. Match 1 meets match 3 and match 2 meets
+   * match 4 of a round of four, rather than 1 with 2 and 3 with 4.
    */
   for (let r = 0; r < rounds.length - 1; r++) {
     const next = rounds[r + 1].length;
