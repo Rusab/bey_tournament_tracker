@@ -730,15 +730,26 @@ const slug = (s) => (s || "tournament").toLowerCase().replace(/[^a-z0-9]+/g, "-"
 
 /* ---- bracket ---- */
 
-function seedOrder(n) {
-  let arr = [1, 2];
-  while (arr.length < n) {
-    const len = arr.length * 2 + 1;
-    const out = [];
-    arr.forEach((s) => { out.push(s); out.push(len - s); });
-    arr = out;
-  }
-  return arr;
+/**
+ * Who meets whom in the first round, as a flat list of seeds: slot, opponent,
+ * slot, opponent.
+ *
+ * The field is split down the middle and the halves played off against each
+ * other in order — the best seed takes the best of the bottom half, the second
+ * takes the second, and so on. In a four that is 1 v 3 and 2 v 4; in an eight,
+ * 1 v 5 through 4 v 8.
+ *
+ * Byes come off the top, so a short field still rewards the seeds that earned
+ * it. The seeds left after the byes close up and split the same way, which is
+ * why the split is taken from `byes` rather than from 1.
+ */
+function seedOrder(n, entrants) {
+  const half = n / 2;
+  const byes = Math.max(0, Math.min(half, n - (entrants == null ? n : entrants)));
+  const out = [];
+  for (let i = 1; i <= byes; i++) { out.push(i); out.push(null); }
+  for (let k = 1; k <= half - byes; k++) { out.push(byes + k); out.push(half + k); }
+  return out;
 }
 
 function roundName(teams) {
@@ -786,8 +797,8 @@ function avoidSameGroup(pairs) {
 }
 
 function buildBracket(qualifiers, size, thirdPlace) {
-  const order = seedOrder(size);
-  const slots = order.map((s) => qualifiers[s - 1] || null);
+  const order = seedOrder(size, qualifiers.length);
+  const slots = order.map((s) => (s == null ? null : qualifiers[s - 1] || null));
   let first = [];
   for (let i = 0; i < size; i += 2) first.push({ p1: slots[i], p2: slots[i + 1] });
   first = avoidSameGroup(first);
