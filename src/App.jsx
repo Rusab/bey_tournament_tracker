@@ -408,7 +408,31 @@ function buildGroupMatches(groups, existing = []) {
  *            impossible while a match runs to a target, but it costs nothing to
  *            count and would otherwise silently score zero.
  */
-function computeStandings(playerIds, matches, nameOf, lp) {
+/*
+ * Two bladers the table cannot separate.
+ *
+ * Until now the order between them came from their names, which decides who
+ * goes through on the alphabet. Instead the organiser plays a tie-breaker and
+ * records who won it. Only the winner is kept: a tie-breaker settles the
+ * order and nothing else, so its score would be a number with no meaning
+ * anywhere — not in the table, not in margins, not in the final standings.
+ */
+const tieKey = (a, b) => [a, b].sort().join("~");
+const tieWinner = (ties, a, b) => (ties && ties[tieKey(a, b)]) || null;
+const tieOrder = (ties, a, b) => {
+  const w = tieWinner(ties, a, b);
+  return w ? (w === a ? -1 : 1) : 0;
+};
+
+/** Level on every measure the table has, in the order it applies them. */
+const levelOn = (x, y, lp) =>
+  (lp ? x.pts === y.pts : true) &&
+  x.wins === y.wins &&
+  x.winMargin === y.winMargin &&
+  x.pf - x.pa === y.pf - y.pa &&
+  x.pf === y.pf;
+
+function computeStandings(playerIds, matches, nameOf, lp, ties) {
   const rec = {};
   playerIds.forEach((id) => {
     rec[id] = { id, played: 0, wins: 0, losses: 0, draws: 0, pts: 0, pf: 0, pa: 0, winMargin: 0 };
@@ -443,8 +467,42 @@ function computeStandings(playerIds, matches, nameOf, lp) {
       y.winMargin - x.winMargin ||
       (y.pf - y.pa) - (x.pf - x.pa) ||
       y.pf - x.pf ||
+      tieOrder(ties, x.id, y.id) ||
       nameOf(x.id).localeCompare(nameOf(y.id))
   );
+}
+
+/**
+ * The ties an organiser actually has to settle: pairs nothing separates, in
+ * the places that decide something. A tie for a place nobody qualifies from
+ * changes nothing and is left alone; one that straddles the cut, or sits
+ * among the qualifiers where it sets the seeding, is theirs to break.
+ *
+ * Only groups that have finished are asked about. Half-played, everybody is
+ * level with everybody and the question is meaningless.
+ */
+function pendingTies(t, nameOf) {
+  if (isLeague(t) || !t.koSize) return [];
+  const out = [];
+  t.groups.forEach((g) => {
+    const ms = t.groupMatches.filter((m) => m.groupId === g.id);
+    if (!ms.length || !ms.every((m) => m.done)) return;
+    const rows = computeStandings(g.playerIds, ms, nameOf, null, t.tieBreaks);
+    rows.forEach((r, i) => {
+      if (i === 0 || i - 1 >= t.advance) return;
+      const prev = rows[i - 1];
+      if (!levelOn(prev, r, null)) return;
+      out.push({
+        key: tieKey(prev.id, r.id),
+        group: g.name,
+        a: prev.id, b: r.id,
+        place: i,                        // the place the two are level on
+        cut: i === t.advance,            // ... and only one of them goes through
+        winner: tieWinner(t.tieBreaks, prev.id, r.id),
+      });
+    });
+  });
+  return out;
 }
 
 /* ---- end of tournament ---- */
@@ -690,11 +748,11 @@ function roundName(teams) {
   return "Final";
 }
 
-function collectQualifiers(groups, groupMatches, advance, nameOf) {
+function collectQualifiers(groups, groupMatches, advance, nameOf, ties) {
   const out = [];
   groups.forEach((g) => {
     const ms = groupMatches.filter((m) => m.groupId === g.id);
-    computeStandings(g.playerIds, ms, nameOf)
+    computeStandings(g.playerIds, ms, nameOf, null, ties)
       .slice(0, advance)
       .forEach((row, i) => out.push({ ...row, groupId: g.id, placement: i + 1 }));
   });
@@ -704,6 +762,7 @@ function collectQualifiers(groups, groupMatches, advance, nameOf) {
       y.wins - x.wins ||
       y.winMargin - x.winMargin ||
       (y.pf - y.pa) - (x.pf - x.pa) ||
+      tieOrder(ties, x.id, y.id) ||
       nameOf(x.id).localeCompare(nameOf(y.id))
   );
 }
@@ -2225,9 +2284,22 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
   const playedCount = everything.filter((m) => m.done).length;
   const [ask, setAsk] = useState(false);
 
+  const ties = isAdmin ? pendingTies(t, nameOf) : [];
+  const unsettled = ties.filter((x) => !x.winner).length;
+
+  /* Recorded against the pair, not the group or the place, so it survives
+     everything around it changing — a rebuild, a late result, another
+     blader added. Choosing the name already chosen clears it. */
+  const setTie = (a, b, winner) => update((d) => {
+    const next = { ...(d.tieBreaks || {}) };
+    if (winner) next[tieKey(a, b)] = winner; else delete next[tieKey(a, b)];
+    d.tieBreaks = next;
+    return d;
+  });
+
   const makeBracket = () => {
     update((d) => {
-      const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf);
+      const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf, d.tieBreaks);
       d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
       return d;
     });
@@ -2287,7 +2359,8 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
       {t.groups.map((g, gi) => {
         if (group !== ALL_GROUPS && g.id !== group) return null;
         const ms = t.groupMatches.filter((m) => m.groupId === g.id);
-        const rows = computeStandings(g.playerIds, ms, nameOf, isLeague(t) ? t.leaguePoints : null);
+        const rows = computeStandings(g.playerIds, ms, nameOf,
+          isLeague(t) ? t.leaguePoints : null, t.tieBreaks);
         const col = GROUP_COLORS[gi % GROUP_COLORS.length];
         return (
           <div key={g.id} style={{ ...card, marginBottom: 14, padding: 0, overflow: "hidden", borderLeft: `4px solid ${col}` }}>
@@ -2346,6 +2419,39 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
         ties on wins before anything else does.
       </div>
 
+      {ties.length > 0 && (
+        <div style={{ ...card, borderColor: `${C.gold}88`, marginBottom: 14 }}>
+          <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>
+            Tie-breaker{ties.length > 1 ? "s" : ""}
+          </div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "58ch" }}>
+            Nothing in the table separates these. Play them off and tap whoever won — the
+            score is not kept, only the result, and the standings and the seeding follow it.
+            Tapping the same name again undoes the decision.
+          </div>
+          {ties.map((x) => (
+            <div key={x.key} style={{
+              background: C.base, border: `1px solid ${C.line}`, borderRadius: 3,
+              padding: "10px 11px", marginBottom: 7,
+            }}>
+              <div style={{ fontSize: 12, color: C.muted, marginBottom: 7 }}>
+                {x.group} · level on place {x.place}
+                {x.cut ? " — the last one through" : ""}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                {[x.a, x.b].map((id) => (
+                  <Btn key={id} tone={x.winner === id ? "primary" : "default"}
+                    onClick={() => setTie(x.a, x.b, x.winner === id ? null : id)}
+                    style={{ justifyContent: "center" }}>
+                    {x.winner === id && <Check size={14} />}{nameOf(id)}
+                  </Btn>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {t.koSize > 0 && isAdmin && (
         <div style={{ ...card, borderColor: allPlayed ? `${C.magenta}88` : C.line }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>
@@ -2356,6 +2462,9 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
               ? `Seeds the top ${t.advance} from each group into the ${roundName(t.koSize).toLowerCase()}.`
               : `${t.groupMatches.filter((m) => !m.done).length} group matches still to play. You can build early, but the seeding will change.`}
             {t.bracket && " Rebuilding clears any knockout results already entered."}
+            {unsettled > 0 && ` ${unsettled} tie-breaker${unsettled > 1 ? "s are" : " is"} still
+              unsettled; without ${unsettled > 1 ? "them" : "it"} those places fall back to
+              alphabetical order.`}
           </div>
           <Btn onClick={() => (t.bracket ? setAsk(true) : makeBracket())}
             tone={allPlayed ? "primary" : "default"}>
