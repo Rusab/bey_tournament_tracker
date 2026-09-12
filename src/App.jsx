@@ -751,25 +751,9 @@ function seedOrder(n, entrants) {
   // with the byes taken off the top before the halves are cut.
   const pair = (j) => [j, j <= byes ? null : half + (j - byes)];
 
-  return bracketOrder(half).flatMap(pair);
-}
-
-/**
- * Where each pair sits in the tree, which is a separate question from who is
- * in it. Semi-finals are fed by the first two matches and the last two, so
- * listing the pairs 1, 2, 3, 4 would put the top two seeds in the same half
- * and have them meet a round early. The classic walk — first, last, and
- * inwards — is what keeps them apart until the final.
- */
-function bracketOrder(m) {
-  let arr = [1];
-  while (arr.length < m) {
-    const len = arr.length * 2 + 1;
-    const out = [];
-    arr.forEach((s) => { out.push(s); out.push(len - s); });
-    arr = out;
-  }
-  return arr;
+  const out = [];
+  for (let j = 1; j <= half; j++) out.push(...pair(j));
+  return out;
 }
 
 function roundName(teams) {
@@ -853,11 +837,22 @@ function propagate(bracket) {
     if ((m.p1 && !m.p2) || (m.p2 && !m.p1)) m.done = true;
   });
 
+  /*
+   * Every round is split down the middle, the same way the first one was
+   * seeded: the top half of a round plays the bottom half of it, in order.
+   * Match 1 meets match 3 and match 2 meets match 4 of a round of four — not
+   * 1 with 2 and 3 with 4, which would put the two best seeds in the same
+   * half and have them meet a round early.
+   *
+   * So the rule reads the same at every stage: 1 v 3 and 2 v 4, all the way
+   * down to the final.
+   */
   for (let r = 0; r < rounds.length - 1; r++) {
+    const next = rounds[r + 1].length;
     rounds[r].forEach((m, i) => {
       const w = winnerOf(m);
-      const tgt = rounds[r + 1][Math.floor(i / 2)];
-      const slot = i % 2 === 0 ? "p1" : "p2";
+      const tgt = rounds[r + 1][i % next];
+      const slot = i < next ? "p1" : "p2";
       if (tgt[slot] !== w) { tgt[slot] = w; tgt.events = []; tgt.done = false; }
     });
   }
