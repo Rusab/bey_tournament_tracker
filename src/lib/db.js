@@ -24,8 +24,24 @@ export function onAuthChange(fn) {
 export const signIn = (email, password) =>
   supabase.auth.signInWithPassword({ email: email.trim(), password });
 
+/*
+ * The confirmation link has to come back to whatever host this is running on.
+ * Without a redirect given here, Supabase falls back to the project's Site
+ * URL, which ships as http://localhost:3000 - so the link in the email walks
+ * the new account off the live site and onto a machine that is not there, and
+ * the address never gets confirmed.
+ *
+ * origin rather than a constant, so a signup from the workers.dev address and
+ * one from a custom domain each come back to where they started. The URL must
+ * still be on the project's redirect allow list; anything else is ignored and
+ * falls back to the Site URL again.
+ */
 export const signUp = (email, password) =>
-  supabase.auth.signUp({ email: email.trim(), password });
+  supabase.auth.signUp({
+    email: email.trim(),
+    password,
+    options: { emailRedirectTo: window.location.origin },
+  });
 
 export const signOut = () => supabase.auth.signOut();
 
