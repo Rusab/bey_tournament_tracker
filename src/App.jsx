@@ -3684,6 +3684,13 @@ function NotLive({ onUnlock }) {
 
 const FORMAT_LABEL = { knockout: "Groups & knockout", tag: "Tag team", league: "League" };
 
+/** 1st, 2nd, 3rd, 4th ... 11th, 12th, 13th ... 21st. */
+function ordinal(n) {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return `${n}th`;
+  return `${n}${["th", "st", "nd", "rd"][n % 10] || "th"}`;
+}
+
 /**
  * Setting one knockout round by hand.
  *
@@ -3719,7 +3726,32 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
     return next;
   });
 
-  const players = [...t.players].sort((x, y) => x.name.localeCompare(y.name));
+  /*
+   * Only who came through the group stage can be placed, each with where they
+   * finished, listed group by group so the draw can be read straight off it.
+   *
+   * Anyone already sitting in this round who is not a qualifier — standings
+   * shifted after the bracket was built, say — is kept on the list and
+   * flagged, so the match still shows who is in it rather than going blank.
+   */
+  const choices = (() => {
+    const quals = collectQualifiers(t.groups, t.groupMatches, t.advance, nameOf, t.tieBreaks);
+    const order = (id) => t.groups.findIndex((g) => g.id === id);
+    const out = quals
+      .slice()
+      .sort((x, y) => order(x.groupId) - order(y.groupId) || x.placement - y.placement)
+      .map((q) => {
+        const g = t.groups.find((x) => x.id === q.groupId);
+        return { value: q.id, label: `${nameOf(q.id)} — ${g ? g.name : "Group"} ${ordinal(q.placement)}` };
+      });
+    ms.flatMap((m) => [m.p1, m.p2]).filter(Boolean).forEach((id) => {
+      if (!out.some((o) => o.value === id)) {
+        out.push({ value: id, label: `${nameOf(id)} — not a qualifier` });
+      }
+    });
+    return out;
+  })();
+
   const describe = (m) => {
     const w = winnerOf(m);
     if (w) return ` — ${nameOf(w)}`;
@@ -3753,7 +3785,7 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
     <SheetFrame title={`${name} matchups`} onClose={onClose}>
       <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 16, maxWidth: "58ch" }}>
         {opening
-          ? "Choose who plays whom. Picking someone already in another match swaps the two of them."
+          ? "Choose who plays whom from those who came through the groups. Picking someone already in another match swaps the two of them."
           : `Choose which ${roundName(prev.length * 2).toLowerCase()} winner fills each place. Picking one already used elsewhere swaps them, so every match still feeds exactly one place.`}
       </div>
 
@@ -3773,7 +3805,7 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
               {opening
                 ? pick(pr[k] || "", (v) => place(i, k, v || null), [
                     { value: "", label: "— empty (bye) —" },
-                    ...players.map((p) => ({ value: p.id, label: p.name })),
+                    ...choices,
                   ])
                 : pick(String(pr[k]), (v) => place(i, k, Number(v)),
                     prev.map((m, x) => ({ value: String(x), label: `Winner of M${x + 1}${describe(m)}` })))}
