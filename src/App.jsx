@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon, Download, Crown,
+  Image as ImageIcon, Download, Crown, Pencil,
 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 import {
@@ -845,6 +845,62 @@ function buildBracket(qualifiers, size, thirdPlace) {
   });
 }
 
+/*
+ * Which matches of the round before feed each match of round r, as
+ * [[sourceForP1, sourceForP2], ...] indexing into that earlier round.
+ *
+ * By default a round is split down the middle — match j takes the winners of
+ * j and j + half — so match 1 meets match 3 and match 2 meets match 4. An
+ * organiser can rewire any round by hand; that arrangement is kept on the
+ * bracket and used instead, as long as it is a whole one: every earlier match
+ * used exactly once. Anything less falls back to the default rather than
+ * leaving a winner with nowhere to go.
+ */
+const defaultFeed = (next) => Array.from({ length: next }, (_, j) => [j, j + next]);
+
+function validFeed(f, next) {
+  if (!Array.isArray(f) || f.length !== next) return false;
+  const all = f.flat();
+  return all.length === next * 2
+    && all.every((x) => Number.isInteger(x) && x >= 0 && x < next * 2)
+    && new Set(all).size === next * 2;
+}
+
+function feedFor(bracket, r) {
+  const next = bracket.rounds[r].length;
+  const f = bracket.feeds && bracket.feeds[r];
+  return validFeed(f, next) ? f : defaultFeed(next);
+}
+
+/**
+ * A round set by hand.
+ *
+ * The opening round takes names: [[p1, p2], ...]. A match whose players
+ * change loses its result, and propagate then clears whatever it fed. Later
+ * rounds take a feed instead, and propagate re-places their players from it
+ * — clearing a result the same way wherever the players change. A feed that
+ * matches the default is stored as no feed at all, so going back to the
+ * default really is going back.
+ */
+function setRound(bracket, r, value) {
+  const b = { ...bracket, rounds: bracket.rounds.map((x) => x.map((m) => ({ ...m }))) };
+  if (r === 0) {
+    b.rounds[0].forEach((m, i) => {
+      const [p1, p2] = value[i];
+      if ((m.p1 || null) !== p1 || (m.p2 || null) !== p2) {
+        m.p1 = p1; m.p2 = p2; m.events = []; m.done = false; m.sets = null;
+      }
+    });
+    b.edited = { ...(b.edited || {}), 0: true };
+  } else {
+    const plain = JSON.stringify(value) === JSON.stringify(defaultFeed(b.rounds[r].length));
+    b.feeds = { ...(b.feeds || {}) };
+    if (plain) delete b.feeds[r]; else b.feeds[r] = value;
+    b.edited = { ...(b.edited || {}), [r]: !plain };
+  }
+  return propagate(b);
+}
+
 function propagate(bracket) {
   const rounds = bracket.rounds.map((r) => r.map((m) => ({ ...m })));
 
@@ -855,18 +911,15 @@ function propagate(bracket) {
     if ((m.p1 && !m.p2) || (m.p2 && !m.p1)) m.done = true;
   });
 
-  /*
-   * Every round is split down the middle: the top half of a round plays the
-   * bottom half of it, in order. Match 1 meets match 3 and match 2 meets
-   * match 4 of a round of four, rather than 1 with 2 and 3 with 4.
-   */
+  // Each later match is filled from the earlier matches its feed names.
   for (let r = 0; r < rounds.length - 1; r++) {
-    const next = rounds[r + 1].length;
-    rounds[r].forEach((m, i) => {
-      const w = winnerOf(m);
-      const tgt = rounds[r + 1][i % next];
-      const slot = i < next ? "p1" : "p2";
-      if (tgt[slot] !== w) { tgt[slot] = w; tgt.events = []; tgt.done = false; }
+    const feed = feedFor(bracket, r + 1);
+    rounds[r + 1].forEach((tgt, j) => {
+      ["p1", "p2"].forEach((slot, k) => {
+        const src = rounds[r][feed[j][k]];
+        const w = src ? winnerOf(src) : null;
+        if (tgt[slot] !== w) { tgt[slot] = w; tgt.events = []; tgt.done = false; }
+      });
     });
   }
 
@@ -1191,6 +1244,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState(initialTab);
   const [scoring, setScoring] = useState(null);
+  const [editRound, setEditRound] = useState(null);   // knockout round being set by hand
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
@@ -1399,6 +1453,11 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
     });
   };
 
+  const saveRound = (r, value) => {
+    update((d) => { d.bracket = setRound(d.bracket, r, value); return d; });
+    setEditRound(null);
+  };
+
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
 
   return (
@@ -1475,7 +1534,8 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin}
             group={group} setGroup={setGroup} onPlayer={setDetail} onFinal={() => setShowFinal(true)} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
-            onScore={(id) => setScoring({ kind: "ko", id })} />}
+            onScore={(id) => setScoring({ kind: "ko", id })}
+            onEditRound={isAdmin ? setEditRound : null} />}
           {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
         </div>
       </main>
@@ -1518,6 +1578,11 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           onClose={() => setScoring(null)}
           onSave={(events, done, sets) => { saveScore(scoring.kind, scoring.id, events, done, sets); setScoring(null); }}
         />
+      )}
+      {editRound !== null && isAdmin && t.bracket && t.bracket.rounds[editRound] && (
+        <BracketEditor t={t} round={editRound} nameOf={nameOf}
+          onClose={() => setEditRound(null)}
+          onSave={(value) => saveRound(editRound, value)} />
       )}
       {detail && (
         <PlayerSheet playerId={detail} t={t} nameOf={nameOf}
@@ -2246,7 +2311,7 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
 }
 
 /** byePossible: only the opening round, where an empty slot really is a bye. */
-function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf }) {
+function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pending }) {
   const { s1, s2 } = scoreOf(m);
   const w = winnerOf(m);
   const both = m.p1 && m.p2 && !locked;
@@ -2274,7 +2339,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf }) {
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
         whiteSpace: "nowrap", fontWeight: w === m.p1 ? 700 : 400,
         color: m.p1 ? (w === m.p1 ? C.magenta : C.ink) : C.muted,
-      }}>{m.p1 ? nameOf(m.p1) : "TBD"}</span>
+      }}>{m.p1 ? nameOf(m.p1) : (m.p2 && byePossible ? "Bye" : (pending ? pending[0] : "TBD"))}</span>
       <span className="bx-d" style={{
         fontSize: 19, fontWeight: 800, flexShrink: 0,
         color: m.done ? C.ink : C.muted, minWidth: 50, textAlign: "center",
@@ -2283,7 +2348,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf }) {
         flex: 1, fontSize: 14.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
         whiteSpace: "nowrap", textAlign: "right", fontWeight: w === m.p2 ? 700 : 400,
         color: m.p2 ? (w === m.p2 ? C.cyan : C.ink) : C.muted,
-      }}>{m.p2 ? nameOf(m.p2) : (m.p1 && byePossible ? "Bye" : "TBD")}</span>
+      }}>{m.p2 ? nameOf(m.p2) : (m.p1 && byePossible ? "Bye" : (pending ? pending[1] : "TBD"))}</span>
       </div>
       {sets && (
         <div style={{
@@ -2546,9 +2611,12 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
       {ask && (
         <Confirm
           title="Rebuild the bracket?"
-          body={koScored > 0
+          body={(koScored > 0
             ? `The bracket is reseeded from the current standings, and the ${koScored} knockout match${koScored > 1 ? "es" : ""} already scored ${koScored > 1 ? "are" : "is"} cleared.`
-            : "The bracket is reseeded from the current standings. Nothing has been scored in the knockout yet, so no results are lost."}
+            : "The bracket is reseeded from the current standings. Nothing has been scored in the knockout yet, so no results are lost.")
+            + (t.bracket && t.bracket.edited && Object.values(t.bracket.edited).some(Boolean)
+              ? " Matchups you set by hand are replaced too."
+              : "")}
           confirmLabel="Rebuild" tone={koScored > 0 ? "danger" : "primary"}
           onConfirm={makeBracket} onClose={() => setAsk(false)}
         />
@@ -2566,7 +2634,7 @@ const td = {
 /*  Bracket                                                            */
 /* ================================================================== */
 
-function BracketView({ t, nameOf, onScore, isAdmin }) {
+function BracketView({ t, nameOf, onScore, isAdmin, onEditRound }) {
   if (t.koSize === 0) {
     return <EmptyState title="Group stage only" body="This tournament was set up without a knockout stage." />;
   }
@@ -2616,17 +2684,36 @@ function BracketView({ t, nameOf, onScore, isAdmin }) {
 
       {t.bracket.rounds.map((r, ri) => {
         const teams = r.length * 2;
+        // A final fed by two semis has only one arrangement, so it has no editor.
+        const editable = onEditRound && (ri === 0 || r.length >= 2);
+        const edited = t.bracket.edited && t.bracket.edited[ri];
+        const feed = ri > 0 ? feedFor(t.bracket, ri) : null;
         return (
           <div key={ri} style={{ marginBottom: 24 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9, flexWrap: "wrap" }}>
               <Blade color={C.gold} h={17} />
               <span className="bx-d" style={{ fontSize: 18, fontWeight: 700 }}>{roundName(teams)}</span>
+              {edited && (
+                <span style={{ fontSize: 11, color: C.gold, border: `1px solid ${C.gold}55`, borderRadius: 3, padding: "1px 6px" }}>
+                  set by hand
+                </span>
+              )}
               <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>
                 {stageLine(t, stageKeyForTeams(teams))}
               </span>
+              {editable && (
+                <button onClick={() => onEditRound(ri)} aria-label={`Edit ${roundName(teams)} matchups`}
+                  style={{
+                    background: "none", border: `1px solid ${C.line}`, borderRadius: 3, color: C.muted,
+                    cursor: "pointer", display: "flex", alignItems: "center", gap: 5, padding: "4px 8px", fontSize: 12.5,
+                  }}>
+                  <Pencil size={13} />Edit
+                </button>
+              )}
             </div>
             {r.map((m, i) => (
               <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} byePossible={ri === 0}
+                pending={feed ? [`Winner M${feed[i][0] + 1}`, `Winner M${feed[i][1] + 1}`] : null}
                 bestOf={bestOfFor(m, t)} onClick={() => onScore(m.id)} label={`M${i + 1}`} />
             ))}
           </div>
@@ -3596,6 +3683,128 @@ function NotLive({ onUnlock }) {
 /* ================================================================== */
 
 const FORMAT_LABEL = { knockout: "Groups & knockout", tag: "Tag team", league: "League" };
+
+/**
+ * Setting one knockout round by hand.
+ *
+ * The opening round is set by name: who plays whom. Every round after it is
+ * set by where its players come from — which earlier match's winner fills
+ * each slot — because those players are not known until the round before is
+ * played. A semi-final arranged before the quarter-finals is necessarily an
+ * arrangement of winners, not of people, and stays right whoever wins.
+ *
+ * Picking something already placed elsewhere swaps the two, so nobody can be
+ * in two matches at once and no earlier match can be left feeding nothing.
+ */
+function BracketEditor({ t, round, nameOf, onClose, onSave }) {
+  const b = t.bracket;
+  const ms = b.rounds[round];
+  const opening = round === 0;
+  const prev = opening ? null : b.rounds[round - 1];
+  const name = roundName(ms.length * 2);
+
+  const [pairs, setPairs] = useState(() => (opening
+    ? ms.map((m) => [m.p1 || null, m.p2 || null])
+    : feedFor(b, round).map((f) => [...f])));
+
+  const place = (i, k, v) => setPairs((cur) => {
+    const next = cur.map((p) => [...p]);
+    const was = next[i][k];
+    if (v !== null) {
+      next.forEach((p, a) => p.forEach((x, c) => {
+        if ((a !== i || c !== k) && x === v) next[a][c] = was;
+      }));
+    }
+    next[i][k] = v;
+    return next;
+  });
+
+  const players = [...t.players].sort((x, y) => x.name.localeCompare(y.name));
+  const describe = (m) => {
+    const w = winnerOf(m);
+    if (w) return ` — ${nameOf(w)}`;
+    if (m.p1 && m.p2) return ` — ${nameOf(m.p1)} v ${nameOf(m.p2)}`;
+    if (m.p1 || m.p2) return ` — ${nameOf(m.p1 || m.p2)}`;
+    return "";
+  };
+
+  // Results that saving would throw away.
+  const current = opening ? null : feedFor(b, round);
+  const changed = ms.map((m, i) => (opening
+    ? (m.p1 || null) !== pairs[i][0] || (m.p2 || null) !== pairs[i][1]
+    : JSON.stringify(current[i]) !== JSON.stringify(pairs[i])));
+  const losing = ms.map((m, i) => (changed[i] && (m.events || []).length ? `M${i + 1}` : null)).filter(Boolean);
+
+  const original = opening ? ms.flatMap((m) => [m.p1, m.p2]).filter(Boolean) : [];
+  const placed = opening ? pairs.flat().filter(Boolean) : [];
+  const dropped = original.filter((id) => !placed.includes(id));
+
+  const plain = !opening && JSON.stringify(pairs) === JSON.stringify(defaultFeed(ms.length));
+  const nothing = !changed.some(Boolean);
+
+  const pick = (value, onChange, options) => (
+    <select value={value} onChange={(e) => onChange(e.target.value)}
+      style={{ ...inputStyle, padding: "10px 10px", fontSize: 14.5 }}>
+      {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+
+  return (
+    <SheetFrame title={`${name} matchups`} onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 16, maxWidth: "58ch" }}>
+        {opening
+          ? "Choose who plays whom. Picking someone already in another match swaps the two of them."
+          : `Choose which ${roundName(prev.length * 2).toLowerCase()} winner fills each place. Picking one already used elsewhere swaps them, so every match still feeds exactly one place.`}
+      </div>
+
+      {pairs.map((pr, i) => (
+        <div key={i} style={{
+          background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
+          padding: "11px 12px", marginBottom: 8,
+        }}>
+          <div className="bx-d" style={{ fontSize: 13, color: C.muted, marginBottom: 7 }}>
+            M{i + 1}{(ms[i].events || []).length ? " · has a result" : ""}
+          </div>
+          {[0, 1].map((k) => (
+            <div key={k}>
+              {k === 1 && (
+                <div className="bx-d" style={{ textAlign: "center", color: C.muted, fontSize: 13, margin: "4px 0" }}>v</div>
+              )}
+              {opening
+                ? pick(pr[k] || "", (v) => place(i, k, v || null), [
+                    { value: "", label: "— empty (bye) —" },
+                    ...players.map((p) => ({ value: p.id, label: p.name })),
+                  ])
+                : pick(String(pr[k]), (v) => place(i, k, Number(v)),
+                    prev.map((m, x) => ({ value: String(x), label: `Winner of M${x + 1}${describe(m)}` })))}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {dropped.length > 0 && (
+        <div style={{ fontSize: 13, color: C.gold, margin: "10px 0", lineHeight: 1.5 }}>
+          No longer in the bracket: {dropped.map(nameOf).join(", ")}.
+        </div>
+      )}
+      {losing.length > 0 && (
+        <div style={{ fontSize: 13, color: C.magenta, margin: "10px 0", lineHeight: 1.5 }}>
+          Saving clears the result of {losing.join(", ")}, and of anything {losing.length > 1 ? "they" : "it"} fed into.
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+        <Btn onClick={() => onSave(pairs)} tone="primary" disabled={nothing}>
+          <Check size={15} />Save matchups
+        </Btn>
+        {!opening && !plain && (
+          <Btn onClick={() => setPairs(defaultFeed(ms.length))}>Back to the default</Btn>
+        )}
+        <Btn onClick={onClose} tone="ghost">Cancel</Btn>
+      </div>
+    </SheetFrame>
+  );
+}
 
 function SheetFrame({ title, onClose, children }) {
   const swipeBack = useSwipeBack(onClose);
