@@ -36,11 +36,17 @@ export const signIn = (email, password) =>
  * still be on the project's redirect allow list; anything else is ignored and
  * falls back to the Site URL again.
  */
-export const signUp = (email, password) =>
+export const signUp = (email, password, { bladerName, realName } = {}) =>
   supabase.auth.signUp({
     email: email.trim(),
     password,
-    options: { emailRedirectTo: window.location.origin },
+    options: {
+      emailRedirectTo: window.location.origin,
+      // Kept with the account until its first sign-in, when ensure_profile
+      // copies them into place — there is no profile row to write to before
+      // the address has been confirmed.
+      data: { blader_name: bladerName || null, real_name: realName || null },
+    },
   });
 
 export const signOut = () => supabase.auth.signOut();
@@ -196,6 +202,83 @@ export async function addReferee(eventId, email) {
 
 export const removeReferee = (eventId, userId) =>
   supabase.from("event_referees").delete().eq("event_id", eventId).eq("user_id", userId);
+
+/* ------------------------------------------------------------------ bladers */
+
+/*
+ * The public half of every account. The private half — email and real name —
+ * stays in profiles, and a real name only ever comes back through
+ * blader_real_name(), which returns nothing to anyone not allowed to see it.
+ */
+
+const BLADER_COLS = "id, blader_name, experience_years, favorite_combo, photo_path, created_at";
+const AVATARS = "avatars";
+
+/** Everyone registered, by name. Null if the list could not be loaded at all. */
+export async function listBladers() {
+  const { data, error } = await supabase
+    .from("bladers").select(BLADER_COLS).order("blader_name");
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+export async function loadBlader(id) {
+  const { data, error } = await supabase
+    .from("bladers").select(BLADER_COLS).eq("id", id).maybeSingle();
+  if (error) { console.error(error); return null; }
+  return data;
+}
+
+/** A real name, or null for anyone the database will not show it to. */
+export async function bladerRealName(id) {
+  const { data, error } = await supabase.rpc("blader_real_name", { p_id: id });
+  if (error) return null;
+  return data || null;
+}
+
+/**
+ * Whether nobody else has this name. Null when it could not be checked, in
+ * which case the save is still refused by the database if it is taken.
+ */
+export async function bladerNameFree(name, except = null) {
+  const { data, error } = await supabase.rpc("blader_name_free", { p_name: name, p_except: except });
+  if (error) return null;
+  return !!data;
+}
+
+/** No row back with no error means the row policy refused it. */
+export async function saveBlader(id, patch) {
+  const { data, error } = await supabase
+    .from("bladers").update(patch).eq("id", id).select(BLADER_COLS).maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("That profile could not be saved.") };
+  return { row: data };
+}
+
+export async function saveRealName(id, realName) {
+  const { error } = await supabase.from("profiles").update({ real_name: realName }).eq("id", id);
+  return { error };
+}
+
+export const avatarUrl = (path) =>
+  path ? supabase.storage.from(AVATARS).getPublicUrl(path).data.publicUrl : null;
+
+/** Into the account's own folder — storage refuses any other. Returns the path. */
+export async function uploadAvatar(userId, blob) {
+  const ext = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" }[blob.type] || "bin";
+  const path = `${userId}/${Date.now()}.${ext}`;
+  const { error } = await supabase.storage
+    .from(AVATARS).upload(path, blob, { contentType: blob.type, cacheControl: "31536000" });
+  if (error) throw error;
+  return path;
+}
+
+/** Best effort: a stray old photo costs a few kilobytes, not a broken profile. */
+export async function removeAvatar(path) {
+  if (!path) return;
+  const { error } = await supabase.storage.from(AVATARS).remove([path]);
+  if (error) console.error(error);
+}
 
 /* -------------------------------------------------------------------- staff */
 

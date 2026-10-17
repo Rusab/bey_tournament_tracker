@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon, Download, Crown, Pencil,
+  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera,
 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 import {
@@ -10,6 +10,8 @@ import {
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
   myEvents, publicEvents, createEvent, archiveEvent, deleteEvent,
   eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
+  listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
+  avatarUrl, uploadAvatar, removeAvatar,
 } from "./lib/db.js";
 
 /* ================================================================== */
@@ -105,6 +107,8 @@ const IMAGE_KINDS = {
   // A logo is drawn ~30px tall, but must keep its transparency — a JPEG
   // fallback would fill the cut-out with black.
   logo: { maxDim: 320, quality: 0.9, alpha: true, prefix: "logo" },
+  // Shown at most ~120px across, usually 36; a little headroom for sharp screens.
+  avatar: { maxDim: 400, quality: 0.8, alpha: false, prefix: "avatar" },
 };
 
 const EXT = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" };
@@ -3574,15 +3578,35 @@ function AuthScreen({ onDone, onBack }) {
   const [mode, setMode] = useState("in");   // "in" | "up"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [bladerName, setBladerName] = useState("");
+  const [realName, setRealName] = useState("");
   const [msg, setMsg] = useState(null);     // { tone, text }
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (busy || !email.trim() || !password) return;
+    const bn = bladerName.trim(), rn = realName.trim();
+    if (mode === "up") {
+      const bad = !bn || !rn ? "Blader name and real name are both needed."
+        : bn.length > 30 ? "Keep the blader name to 30 characters."
+        : rn.length > 80 ? "Keep the real name to 80 characters."
+        : null;
+      if (bad) { setMsg({ tone: C.magenta, text: bad }); return; }
+    }
     setBusy(true); setMsg(null);
+    if (mode === "up") {
+      // Checked here so the person can choose again now. The database is still
+      // the one that refuses a taken name; this only says so sooner.
+      const free = await bladerNameFree(bn);
+      if (free === false) {
+        setBusy(false);
+        setMsg({ tone: C.magenta, text: `Somebody is already "${bn}". Pick another blader name.` });
+        return;
+      }
+    }
     const { error } = mode === "in"
       ? await signIn(email, password)
-      : await signUp(email, password);
+      : await signUp(email, password, { bladerName: bn, realName: rn });
     setBusy(false);
     if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
     if (mode === "up") {
@@ -3621,6 +3645,23 @@ function AuthScreen({ onDone, onBack }) {
           {mode === "in" ? "Sign in" : "Sign up"}
         </h1>
 
+        {mode === "up" && (
+          <>
+            <input
+              style={{ ...inputStyle, marginBottom: 10 }} autoComplete="nickname" maxLength={30}
+              value={bladerName} onChange={(e) => { setBladerName(e.target.value); setMsg(null); }}
+              placeholder="Blader name"
+            />
+            <input
+              style={{ ...inputStyle, marginBottom: 6 }} autoComplete="name" maxLength={80}
+              value={realName} onChange={(e) => { setRealName(e.target.value); setMsg(null); }}
+              placeholder="Real name"
+            />
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 12, lineHeight: 1.45 }}>
+              Your blader name is public. Your real name is only shown to organisers.
+            </div>
+          </>
+        )}
         <input
           style={{ ...inputStyle, marginBottom: 10 }} type="email" autoComplete="username"
           value={email} onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
@@ -3921,6 +3962,281 @@ function RefereeSheet({ event, onClose }) {
   );
 }
 
+/* ================================================================== */
+/*  Bladers                                                            */
+/* ================================================================== */
+
+/** A profile photo, or the blader's initials where there is none. */
+function Avatar({ path, src, name, size = 40 }) {
+  const url = src || avatarUrl(path);
+  const [broken, setBroken] = useState(false);
+  const initials = (name || "?").trim().split(" ").filter(Boolean).slice(0, 2)
+    .map((w) => w[0]).join("").toUpperCase() || "?";
+  const ring = {
+    width: size, height: size, borderRadius: "50%", flexShrink: 0,
+    border: `1px solid ${C.line}`, overflow: "hidden", background: C.raised,
+  };
+  if (url && !broken) {
+    return <img src={url} alt="" onError={() => setBroken(true)} style={{ ...ring, objectFit: "cover", display: "block" }} />;
+  }
+  return (
+    <div className="bx-d" style={{
+      ...ring, display: "grid", placeItems: "center", color: C.cyan,
+      fontSize: Math.round(size * 0.38), fontWeight: 800,
+    }}>{initials}</div>
+  );
+}
+
+const yearsText = (y) => {
+  if (y === null || y === undefined || y === "") return null;
+  const v = Number(y);
+  return `${v} year${v === 1 ? "" : "s"}`;
+};
+
+/** Everyone registered, searchable by blader name. Public. */
+function BladersSheet({ onOpen, onClose }) {
+  const [rows, setRows] = useState(undefined);
+  const [q, setQ] = useState("");
+  useEffect(() => { listBladers().then(setRows); }, []);
+
+  const shown = (rows || []).filter((r) =>
+    r.blader_name.toLowerCase().includes(q.trim().toLowerCase()));
+
+  return (
+    <SheetFrame title="Bladers" onClose={onClose}>
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} color={C.muted} style={{ position: "absolute", left: 12, top: 13 }} />
+        <input style={{ ...inputStyle, paddingLeft: 34 }} value={q} placeholder="Search by blader name"
+          onChange={(e) => setQ(e.target.value)} />
+      </div>
+      {rows === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>The bladers list could not be loaded.</div>
+      ) : shown.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>{q ? "Nobody by that name." : "Nobody has signed up yet."}</div>
+      ) : (
+        <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
+            {shown.length} blader{shown.length === 1 ? "" : "s"}
+          </div>
+          {shown.map((r) => (
+            <button key={r.id} onClick={() => onOpen(r.id)} style={{
+              width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+              background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
+              padding: "10px 12px", marginBottom: 6, cursor: "pointer", color: C.ink,
+            }}>
+              <Avatar path={r.photo_path} name={r.blader_name} size={38} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="bx-d" style={{
+                  fontSize: 16.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>{r.blader_name}</div>
+                {(yearsText(r.experience_years) || r.favorite_combo) && (
+                  <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {[yearsText(r.experience_years), r.favorite_combo].filter(Boolean).join(" · ")}
+                  </div>
+                )}
+              </div>
+              <ChevronRight size={16} color={C.muted} />
+            </button>
+          ))}
+        </>
+      )}
+    </SheetFrame>
+  );
+}
+
+/**
+ * One blader's profile. The real name row appears only when the database
+ * hands one back, which it does for the blader, organisers and staff.
+ */
+function BladerSheet({ id, meId, onClose, onEdit }) {
+  const [b, setB] = useState(undefined);
+  const [real, setReal] = useState(null);
+  useEffect(() => {
+    loadBlader(id).then(setB);
+    if (meId) bladerRealName(id).then(setReal);
+  }, [id, meId]);
+
+  const mine = meId && meId === id;
+  const Row = ({ label, children, note }) => (
+    <div style={{ padding: "11px 0", borderBottom: `1px solid ${C.line}55` }}>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 15.5 }}>{children}</div>
+      {note && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{note}</div>}
+    </div>
+  );
+
+  return (
+    <SheetFrame title={mine ? "Your profile" : "Blader"} onClose={onClose}>
+      {b === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : !b ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>This profile could not be found.</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 12 }}>
+            <Avatar path={b.photo_path} name={b.blader_name} size={84} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: C.cyan, marginBottom: 2 }}>Blader name</div>
+              <div className="bx-d" style={{ fontSize: 30, fontWeight: 800, lineHeight: 1.02, wordBreak: "break-word" }}>
+                {b.blader_name}
+              </div>
+            </div>
+          </div>
+
+          {real && (
+            <Row label="Real name" note={mine ? "Only you, organisers and staff can see this." : null}>{real}</Row>
+          )}
+          <Row label="Experience">
+            {yearsText(b.experience_years) || <span style={{ color: C.muted }}>Not given</span>}
+          </Row>
+          <Row label="Favourite combo">
+            {b.favorite_combo || <span style={{ color: C.muted }}>Not given</span>}
+          </Row>
+          <Row label="Blading here since">{new Date(b.created_at).toLocaleDateString()}</Row>
+
+          {mine && (
+            <Btn onClick={onEdit} tone="primary" style={{ marginTop: 18 }}>
+              <Pencil size={15} />Edit profile
+            </Btn>
+          )}
+        </>
+      )}
+    </SheetFrame>
+  );
+}
+
+/** Editing your own profile. Nothing is saved, photo included, until Save. */
+function ProfileEditSheet({ meId, blader, onClose, onSaved }) {
+  const [name, setName] = useState(blader.blader_name);
+  const [real, setReal] = useState("");
+  const [realLoaded, setRealLoaded] = useState(false);
+  const [exp, setExp] = useState(blader.experience_years ?? "");
+  const [combo, setCombo] = useState(blader.favorite_combo || "");
+  const [photoBlob, setPhotoBlob] = useState(null);     // a new photo, not yet uploaded
+  const [photoGone, setPhotoGone] = useState(false);    // the current one, removed
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  useEffect(() => {
+    bladerRealName(meId).then((r) => { setReal(r || ""); setRealLoaded(true); });
+  }, [meId]);
+
+  const preview = useMemo(() => (photoBlob ? URL.createObjectURL(photoBlob) : null), [photoBlob]);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const pickPhoto = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const blob = await shrinkImage(file, "avatar");
+      if (!blob) throw new Error();
+      setPhotoBlob(blob); setPhotoGone(false); setMsg(null);
+    } catch {
+      setMsg({ tone: C.magenta, text: "That image could not be read. Try a JPEG or PNG." });
+    }
+  };
+
+  const save = async () => {
+    const bn = name.trim(), rn = real.trim();
+    const years = exp === "" ? null : Number(exp);
+    const bad = !bn ? "A blader name is needed."
+      : bn.length > 30 ? "Keep the blader name to 30 characters."
+      : !rn ? "A real name is needed."
+      : rn.length > 80 ? "Keep the real name to 80 characters."
+      : years !== null && !(years >= 0 && years <= 50) ? "Experience should be between 0 and 50 years."
+      : combo.trim().length > 80 ? "Keep the favourite combo to 80 characters."
+      : null;
+    if (bad) { setMsg({ tone: C.magenta, text: bad }); return; }
+
+    setBusy(true); setMsg(null);
+    try {
+      if (bn.toLowerCase() !== blader.blader_name.trim().toLowerCase()) {
+        const free = await bladerNameFree(bn, meId);
+        if (free === false) throw new Error(`Somebody is already "${bn}". Pick another blader name.`);
+      }
+
+      const old = blader.photo_path;
+      let photo = photoGone ? null : old;
+      if (photoBlob) photo = await uploadAvatar(meId, photoBlob);
+
+      const { row, error } = await saveBlader(meId, {
+        blader_name: bn,
+        experience_years: years === null ? null : Math.round(years * 10) / 10,
+        favorite_combo: combo.trim() || null,
+        photo_path: photo,
+      });
+      if (error) {
+        if (photoBlob) removeAvatar(photo);   // uploaded for a save that did not happen
+        throw error.code === "23505"
+          ? new Error(`Somebody is already "${bn}". Pick another blader name.`)
+          : error;
+      }
+
+      const r2 = await saveRealName(meId, rn);
+      if (r2.error) throw r2.error;
+
+      if (old && old !== photo) removeAvatar(old);
+      onSaved(row);
+    } catch (err) {
+      setMsg({ tone: C.magenta, text: err.message || "That could not be saved." });
+      setBusy(false);
+    }
+  };
+
+  const showing = photoBlob ? { src: preview } : photoGone ? {} : { path: blader.photo_path };
+
+  return (
+    <SheetFrame title="Edit profile" onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22 }}>
+        <Avatar {...showing} name={name} size={84} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, alignItems: "flex-start" }}>
+          <label style={{
+            display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer",
+            background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3,
+            padding: "8px 12px", fontSize: 14, color: C.ink,
+          }}>
+            <Camera size={15} />{blader.photo_path || photoBlob ? "Change photo" : "Add photo"}
+            <input type="file" accept="image/*" onChange={pickPhoto} style={{ display: "none" }} />
+          </label>
+          {(photoBlob || (blader.photo_path && !photoGone)) && (
+            <button onClick={() => { setPhotoBlob(null); setPhotoGone(true); }}
+              style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13, padding: 0 }}>
+              Remove photo
+            </button>
+          )}
+        </div>
+      </div>
+
+      <Field label="Blader name" hint="Public. Nobody else can have the same one.">
+        <input style={inputStyle} maxLength={30} value={name} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <Field label="Real name" hint="Only you, organisers and staff can see this.">
+        <input style={inputStyle} maxLength={80} value={real} disabled={!realLoaded}
+          placeholder={realLoaded ? "" : "Loading…"} onChange={(e) => setReal(e.target.value)} />
+      </Field>
+      <Field label="Experience (years)" hint="Optional.">
+        <input style={inputStyle} type="number" inputMode="decimal" min={0} max={50} step={0.5}
+          value={exp} onChange={(e) => setExp(e.target.value)} />
+      </Field>
+      <Field label="Favourite combo" hint="Optional. For example: Dran Sword 3-60 Flat.">
+        <input style={inputStyle} maxLength={80} value={combo} onChange={(e) => setCombo(e.target.value)} />
+      </Field>
+
+      {msg && <div style={{ color: msg.tone, fontSize: 13.5, marginBottom: 12, lineHeight: 1.5 }}>{msg.text}</div>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn onClick={save} tone="primary" disabled={busy || !realLoaded}>
+          <Check size={15} />{busy ? "Saving…" : "Save"}
+        </Btn>
+        <Btn onClick={onClose} tone="ghost" disabled={busy}>Cancel</Btn>
+      </div>
+    </SheetFrame>
+  );
+}
+
 function ApprovalsSheet({ onClose }) {
   const [rows, setRows] = useState(null);
   const refresh = () => pendingHosts().then(setRows);
@@ -3960,7 +4276,7 @@ function ApprovalsSheet({ onClose }) {
  * Signing in is a button in the corner rather than a wall, because almost
  * everyone who opens this is here to watch, not to score.
  */
-function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals }) {
+function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile }) {
   const hosted = mine.filter((e) => e.role === "owner");
   const reffed = mine.filter((e) => e.role === "referee");
 
@@ -4039,23 +4355,41 @@ function Directory({ profile, mine, all, onOpen, onNew, onSignIn, onSignOut, onA
             }}>Tournaments</h1>
           </div>
 
-          {profile ? (
-            <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
-              <Unlock size={14} /><span className="bx-role-label">Sign out</span>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <Btn onClick={onBladers} tone="ghost" style={{ padding: "7px 11px" }} aria-label="Bladers">
+              <Users size={14} /><span className="bx-role-label">Bladers</span>
             </Btn>
-          ) : (
-            <Btn onClick={onSignIn} tone="ghost" style={{ padding: "7px 11px", flexShrink: 0 }}>
-              <Lock size={14} /><span className="bx-role-label">Sign in</span>
-            </Btn>
-          )}
+            {profile ? (
+              <Btn onClick={onSignOut} tone="ghost" style={{ padding: "7px 11px" }} aria-label="Sign out">
+                <Unlock size={14} /><span className="bx-role-label">Sign out</span>
+              </Btn>
+            ) : (
+              <Btn onClick={onSignIn} tone="ghost" style={{ padding: "7px 11px" }} aria-label="Sign in">
+                <Lock size={14} /><span className="bx-role-label">Sign in</span>
+              </Btn>
+            )}
+          </div>
         </div>
 
         {profile && (
           <div style={{ marginBottom: 26 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
-              <span className="bx-d" style={{ fontSize: 14, color: C.muted }}>
-                Signed in · {profile.email}
-              </span>
+              {me ? (
+                <button onClick={onProfile} style={{
+                  display: "flex", alignItems: "center", gap: 8, background: "none", border: "none",
+                  padding: 0, cursor: "pointer", color: C.ink, minWidth: 0,
+                }}>
+                  <Avatar path={me.photo_path} name={me.blader_name} size={28} />
+                  <span className="bx-d" style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {me.blader_name}
+                  </span>
+                  <span style={{ fontSize: 12, color: C.muted }}>Profile</span>
+                </button>
+              ) : (
+                <span className="bx-d" style={{ fontSize: 14, color: C.muted }}>
+                  Signed in · {profile.email}
+                </span>
+              )}
               {profile.is_staff && (
                 <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
                   Approvals
@@ -4147,6 +4481,10 @@ export default function App() {
   const [sheet, setSheet] = useState(null);            // "referees" | "approvals"
   const [directory, setDirectory] = useState([]);      // every live tournament
   const [signingIn, setSigningIn] = useState(false);
+  const [me, setMe] = useState(null);                  // this account's public blader row
+  const [viewBlader, setViewBlader] = useState(null);  // whose profile is open
+  const [editing, setEditing] = useState(false);
+  const [bladerVersion, setBladerVersion] = useState(0);  // bumped after an edit, to reload
 
   useEffect(() => {
     currentSession().then(setSession);
@@ -4158,8 +4496,13 @@ export default function App() {
   useEffect(() => { publicEvents().then(setDirectory); }, []);
 
   useEffect(() => {
-    if (!session) { setProfile(null); setEvents([]); return; }
-    loadProfile(session.user.id).then(setProfile);
+    if (!session) { setProfile(null); setEvents([]); setMe(null); return; }
+    // The blader row is made by ensure_profile, which loadProfile runs, so it
+    // is only asked for once that has finished.
+    loadProfile(session.user.id).then((p) => {
+      setProfile(p);
+      loadBlader(session.user.id).then(setMe);
+    });
     myEvents(session.user.id).then(setEvents);
     setSigningIn(false);
   }, [session]);
@@ -4244,6 +4587,9 @@ export default function App() {
     <>
       <Directory
         profile={profile}
+        me={me}
+        onBladers={() => setSheet("bladers")}
+        onProfile={() => session && setViewBlader(session.user.id)}
         mine={events}
         all={directory}
         onOpen={(e) => openEvent(e.id)}
@@ -4253,6 +4599,24 @@ export default function App() {
         onSignOut={async () => { await signOut(); setOpenId(null); }}
       />
       {sheet === "approvals" && <ApprovalsSheet onClose={() => setSheet(null)} />}
+      {sheet === "bladers" && (
+        <BladersSheet key={bladerVersion} onOpen={setViewBlader} onClose={() => setSheet(null)} />
+      )}
+      {viewBlader && (
+        <BladerSheet key={`${viewBlader}:${bladerVersion}`} id={viewBlader}
+          meId={session ? session.user.id : null}
+          onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)} />
+      )}
+      {editing && me && session && (
+        <ProfileEditSheet meId={session.user.id} blader={me}
+          onClose={() => setEditing(false)}
+          onSaved={(row) => {
+            setMe(row);
+            setEditing(false);
+            setBladerVersion((v) => v + 1);
+            refreshEvents();   // the directory names organisers by blader name
+          }} />
+      )}
     </>
   );
 }
