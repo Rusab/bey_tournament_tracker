@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
+import { createPortal } from "react-dom";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
@@ -13,7 +14,7 @@ import {
   listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
   avatarUrl, uploadAvatar, removeAvatar,
   bladerNames, listMedals, amAwarder, addMedal, removeMedal,
-  findBlader, bladerEvents,
+  findBlader, bladerEvents, bladerDirectory,
 } from "./lib/db.js";
 
 /* ================================================================== */
@@ -95,6 +96,68 @@ const linkedIds = (players) =>
   new Set((players || []).flatMap((p) => [p.profileId, ...(p.memberIds || [])]).filter(Boolean));
 
 const isLinked = (p) => !!(p.profileId || (p.memberIds || []).some(Boolean));
+
+/*
+ * Names compared for likeness, not equality: case, spacing, punctuation and
+ * accents are dropped, and letters and digits of any script are kept, so a
+ * Bengali name is compared as faithfully as a Latin one.
+ */
+const normName = (s) => String(s || "").toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}]/gu, "");
+const nameWords = (s) => String(s || "").toLowerCase().normalize("NFKD")
+  .split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3);
+
+function editDistance(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/**
+ * How alike two names are. 3: the same. 2: one inside the other, or a slip of
+ * a letter or two. 1: a word in common, such as a first name. 0: not alike.
+ * Short names need to be nearer: two letters out of four is a different name.
+ */
+function nameLikeness(a, b) {
+  const x = normName(a), y = normName(b);
+  if (!x || !y) return 0;
+  if (x === y) return 3;
+  if (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x))) return 2;
+  const longest = Math.max(x.length, y.length);
+  const d = editDistance(x, y);
+  // Under six letters a slip must keep the first letter: Ayon may be Ayan, Joy is not Roy.
+  if ((longest >= 6 && d <= 2) || (longest >= 3 && d <= 1 && x[0] === y[0])) return 2;
+  const words = new Set(nameWords(b));
+  if (nameWords(a).some((w) => words.has(w))) return 1;
+  return 0;
+}
+
+/**
+ * Bladers a typed name might mean, best first, at most five. Measured against
+ * both their blader name and, where it is visible to us, their real name.
+ * Anyone already in the tournament is left out.
+ */
+function matchBladers(name, directory, taken = new Set()) {
+  const out = [];
+  (directory || []).forEach((b) => {
+    if (taken.has(b.id)) return;
+    const byName = nameLikeness(name, b.blader_name);
+    const byReal = b.real_name ? nameLikeness(name, b.real_name) : 0;
+    const score = Math.max(byName, byReal);
+    if (score > 0) out.push({ blader: b, score, on: byName >= byReal ? "blader name" : "real name" });
+  });
+  return out
+    .sort((p, q) => q.score - p.score || p.blader.blader_name.localeCompare(q.blader.blader_name))
+    .slice(0, 5);
+}
 
 /**
  * One typed line into a player, looking up any email in it. A blader is a
@@ -1822,6 +1885,8 @@ function Setup({ onCreate }) {
 
   const [entryMsg, setEntryMsg] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [reviewing, setReviewing] = useState(null);   // a pasted list waiting on match decisions
 
   const addPlayer = async () => {
     if (adding || !entry.trim()) return;
@@ -1838,24 +1903,69 @@ function Setup({ onCreate }) {
    * Lines that fail stay in the box with the reason, so they can be fixed
    * and added again; the rest go in.
    */
+  /*
+   * Each pasted name that is not already an email is checked against everyone
+   * registered. If any look like a match, nothing is added until each has
+   * been confirmed or turned down; closing that review adds nothing at all.
+   */
   const addBulk = async () => {
     if (adding) return;
     const lines = bulk.split(/\n/).map((x) => x.trim()).filter(Boolean);
     if (!lines.length) return;
     setAdding(true); setEntryMsg(null);
     const taken = linkedIds(players);
-    const added = [], left = [], why = [];
+    const dir = await bladerDirectory();
+    const added = [], left = [], why = [], checks = [];
     for (const line of lines) {
       const r = await resolveEntry(line, { eventId: null, taken });
       if (r.error) { left.push(line); why.push(r.error); continue; }
       if (!r.player) continue;
-      [r.player.profileId, ...(r.player.memberIds || [])].filter(Boolean).forEach((id) => taken.add(id));
-      added.push(r.player);
+      const p = r.player;
+      [p.profileId, ...(p.memberIds || [])].filter(Boolean).forEach((id) => taken.add(id));
+      const names = p.members
+        ? p.members.map((m, i) => ({ member: i, label: m, linked: !!(p.memberIds || [])[i] }))
+        : [{ member: null, label: p.name, linked: !!p.profileId }];
+      names.filter((x) => !x.linked).forEach((x) => {
+        const candidates = matchBladers(x.label, dir, taken);
+        if (candidates.length) {
+          checks.push({
+            key: `${added.length}:${x.member === null ? "p" : x.member}`,
+            at: added.length, member: x.member, label: x.label,
+            team: p.members ? p.name : null, candidates,
+          });
+        }
+      });
+      added.push(p);
     }
     setAdding(false);
+    const rest = { left, why };
+    if (checks.length) { setReviewing({ added, checks, ...rest }); return; }
+    finishBulk(added, rest);
+  };
+
+  const finishBulk = (added, { left, why }) => {
     if (added.length) setPlayers((p) => [...p, ...added]);
     setBulk(left.join("\n"));
-    if (why.length) setEntryMsg(why.join(" "));
+    setEntryMsg(why.length ? why.join(" ") : null);
+  };
+
+  // Confirmed matches link the player, under the blader name; turned-down ones stay as typed.
+  const applyReview = (choice) => {
+    const { added, checks } = reviewing;
+    const out = added.map((p) => ({ ...p, members: p.members && [...p.members],
+      memberIds: p.memberIds ? [...p.memberIds] : p.members ? p.members.map(() => null) : undefined }));
+    checks.forEach((c) => {
+      const b = choice[c.key];
+      if (!b) return;
+      const p = out[c.at];
+      if (c.member === null) { p.name = b.blader_name; p.profileId = b.id; }
+      else { p.members[c.member] = b.blader_name; p.memberIds[c.member] = b.id; }
+    });
+    out.forEach((p) => { if (p.memberIds && !p.memberIds.some(Boolean)) delete p.memberIds; });
+    out.forEach((p) => { if (!p.members) delete p.members; if (p.memberIds === undefined) delete p.memberIds; });
+    const r = reviewing;
+    setReviewing(null);
+    finishBulk(out, r);
   };
 
   const league = format === "league";
@@ -1985,8 +2095,24 @@ function Setup({ onCreate }) {
           <div style={{ fontSize: 12, color: C.muted, marginTop: 6, lineHeight: 1.45 }}>
             Type the email someone signed up with instead of a name to link their blader profile.
           </div>
+          {format !== "tag" && (
+            <Btn tone="ghost" onClick={() => setPicking(true)} style={{ marginTop: 8 }}>
+              <Users size={15} />Choose from registered bladers
+            </Btn>
+          )}
           {entryMsg && (
             <div style={{ fontSize: 13, color: C.magenta, marginTop: 6, lineHeight: 1.45 }}>{entryMsg}</div>
+          )}
+          {picking && (
+            <BladerPicker taken={linkedIds(players)} onClose={() => setPicking(false)}
+              onPick={(b) => {
+                setPlayers((p) => [...p, { id: uid(), name: b.blader_name, profileId: b.id }]);
+                setPicking(false);
+              }} />
+          )}
+          {reviewing && (
+            <MatchReview checks={reviewing.checks} onDone={applyReview}
+              onClose={() => setReviewing(null)} />
           )}
           {players.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
@@ -2016,7 +2142,11 @@ function Setup({ onCreate }) {
             placeholder={format === "tag"
               ? "Or paste a list — one team per line, as Name: member, member"
               : "Or paste a list — one name per line"} />
-          {bulk.trim() && <Btn onClick={addBulk} style={{ marginTop: 6 }}>Add pasted names</Btn>}
+          {bulk.trim() && (
+            <Btn onClick={addBulk} disabled={adding} style={{ marginTop: 6 }}>
+              {adding ? "Checking names…" : "Add pasted names"}
+            </Btn>
+          )}
         </Field>
 
         {format === "league" ? (
@@ -2179,6 +2309,7 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
 
   const [entryMsg, setEntryMsg] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [picking, setPicking] = useState(false);
 
   const addPlayer = async () => {
     if (adding || !entry.trim()) return;
@@ -2290,8 +2421,20 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
               onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="A name, or their email" />
             <Btn onClick={addPlayer} tone="primary" disabled={adding} style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
           </div>
+          {!isTag(t) && (
+            <Btn tone="ghost" onClick={() => setPicking(true)} style={{ marginTop: 8 }}>
+              <Users size={15} />Choose from registered bladers
+            </Btn>
+          )}
           {entryMsg && (
             <div style={{ fontSize: 13, color: C.magenta, marginTop: 8, lineHeight: 1.45 }}>{entryMsg}</div>
+          )}
+          {picking && (
+            <BladerPicker taken={linkedIds(t.players)} onClose={() => setPicking(false)}
+              onPick={(b) => {
+                update((d) => { d.players.push({ id: uid(), name: b.blader_name, profileId: b.id }); return d; });
+                setPicking(false);
+              }} />
           )}
           <div style={{ fontSize: 12.5, color: C.muted, marginTop: 8, lineHeight: 1.45, maxWidth: "56ch" }}>
             They arrive outside the groups. Tap them below to place them — everyone
@@ -3209,6 +3352,8 @@ function LinkPanel({ t, playerId, update, eventId }) {
   const [names, setNames] = useState({});
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(null);
+  const [picking, setPicking] = useState(null);    // the slot a blader is being chosen for
+  const [byEmail, setByEmail] = useState(null);    // the slot showing the email field
 
   const slots = !p ? [] : p.members && p.members.length
     ? p.members.map((m, i) => ({ key: `m${i}`, label: m, id: (p.memberIds || [])[i] || null, member: i }))
@@ -3263,12 +3408,26 @@ function LinkPanel({ t, playerId, update, eventId }) {
               <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => write(s, null)}>Unlink</Btn>
             </div>
           ) : (
-            <div style={{ display: "flex", gap: 8 }}>
-              <input style={inputStyle} type="email" placeholder="The email they signed up with"
-                value={emails[s.key] || ""}
-                onChange={(e) => { setEmails((x) => ({ ...x, [s.key]: e.target.value })); setMsg(null); }}
-                onKeyDown={(e) => e.key === "Enter" && link(s)} />
-              <Btn tone="primary" disabled={busy === s.key} style={{ flexShrink: 0 }} onClick={() => link(s)}>Link</Btn>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <Btn tone="primary" onClick={() => { setPicking(s); setMsg(null); }}>
+                  <Link2 size={15} />Link
+                </Btn>
+                {byEmail !== s.key && (
+                  <button onClick={() => setByEmail(s.key)} style={{
+                    background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13, padding: 0,
+                  }}>or use their email</button>
+                )}
+              </div>
+              {byEmail === s.key && (
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <input style={inputStyle} type="email" placeholder="The email they signed up with"
+                    value={emails[s.key] || ""}
+                    onChange={(e) => { setEmails((x) => ({ ...x, [s.key]: e.target.value })); setMsg(null); }}
+                    onKeyDown={(e) => e.key === "Enter" && link(s)} />
+                  <Btn tone="primary" disabled={busy === s.key} style={{ flexShrink: 0 }} onClick={() => link(s)}>Link</Btn>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -3277,7 +3436,154 @@ function LinkPanel({ t, playerId, update, eventId }) {
       <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.45 }}>
         A linked {slots.length > 1 ? "member" : "blader"} gets this tournament on the Tournaments tab of their profile.
       </div>
+      {picking && (
+        <BladerPicker title={`Link ${picking.label}`} taken={linkedIds(t.players)}
+          onClose={() => setPicking(null)}
+          onPick={(b) => { write(picking, b.id); setPicking(null); }} />
+      )}
     </div>
+  );
+}
+
+/**
+ * Choosing a blader from everyone registered. Rendered into the page itself
+ * rather than where it is used, so one opened from inside the scoreboard is
+ * not drawn beneath the scoreboard's header and tab bar.
+ *
+ * Real names show, and can be searched, only for someone allowed to see them;
+ * the list itself decides that.
+ */
+function BladerPicker({ title = "Choose a blader", taken, onPick, onClose }) {
+  const [rows, setRows] = useState(undefined);
+  const [q, setQ] = useState("");
+  useEffect(() => { bladerDirectory().then(setRows); }, []);
+
+  const needle = q.trim().toLowerCase();
+  const shown = (rows || []).filter((r) => !needle
+    || r.blader_name.toLowerCase().includes(needle)
+    || (r.real_name && r.real_name.toLowerCase().includes(needle)));
+
+  return createPortal(
+    <SheetFrame title={title} onClose={onClose}>
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} color={C.muted} style={{ position: "absolute", left: 12, top: 13 }} />
+        <input style={{ ...inputStyle, paddingLeft: 34 }} value={q} autoFocus
+          placeholder="Search bladers" onChange={(e) => setQ(e.target.value)} />
+      </div>
+      {rows === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>The bladers list could not be loaded.</div>
+      ) : shown.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Nobody by that name.</div>
+      ) : shown.map((r) => {
+        const used = taken && taken.has(r.id);
+        return (
+          <button key={r.id} disabled={used} onClick={() => onPick(r)} style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+            background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
+            padding: "10px 12px", marginBottom: 6, color: C.ink,
+            cursor: used ? "default" : "pointer", opacity: used ? 0.45 : 1,
+          }}>
+            <Avatar path={r.photo_path} name={r.blader_name} size={36} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="bx-d" style={{ fontSize: 16, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.blader_name}
+              </div>
+              {(r.real_name || used) && (
+                <div style={{ fontSize: 12, color: C.muted }}>
+                  {[r.real_name, used ? "already in this tournament" : null].filter(Boolean).join(" · ")}
+                </div>
+              )}
+            </div>
+          </button>
+        );
+      })}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
+/**
+ * Pasted names that look like someone registered, one at a time: confirm the
+ * blader it is, or keep the name as typed. A blader confirmed for one name is
+ * not offered for another, since one person cannot enter twice.
+ */
+function MatchReview({ checks, onDone, onClose }) {
+  const [choice, setChoice] = useState({});   // key -> blader, or false for "keep as typed"
+  const chosenFor = (id) => Object.keys(choice).find((k) => choice[k] && choice[k].id === id);
+  const decide = (key, value) => setChoice((x) => {
+    const next = { ...x };
+    if (value === undefined) delete next[key]; else next[key] = value;
+    return next;
+  });
+  const undecided = checks.filter((c) => !(c.key in choice)).length;
+
+  const finish = (all) => {
+    const out = { ...choice };
+    if (all) checks.forEach((c) => { if (!(c.key in out)) out[c.key] = false; });
+    onDone(out);
+  };
+
+  return createPortal(
+    <SheetFrame title="Possible matches" onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 16, maxWidth: "58ch" }}>
+        Some pasted names look like bladers who have signed up. Confirm who each one is to link
+        their profile, or keep the name as typed. Nothing is added until you finish.
+      </div>
+
+      {checks.map((c) => (
+        <div key={c.key} style={{ ...card, marginBottom: 10 }}>
+          <div className="bx-d" style={{ fontSize: 17, fontWeight: 700, marginBottom: 2 }}>“{c.label}”</div>
+          {c.team && <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>in team {c.team}</div>}
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {c.candidates.map(({ blader: b, on }) => {
+              const picked = choice[c.key] && choice[c.key].id === b.id;
+              const elsewhere = !picked && chosenFor(b.id);
+              return (
+                <button key={b.id} disabled={!!elsewhere}
+                  onClick={() => decide(c.key, picked ? undefined : b)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "8px 10px",
+                    background: picked ? `${C.green}1A` : C.base, color: C.ink, borderRadius: 3,
+                    border: `1px solid ${picked ? C.green : C.line}`,
+                    cursor: elsewhere ? "default" : "pointer", opacity: elsewhere ? 0.45 : 1,
+                  }}>
+                  <Avatar path={b.photo_path} name={b.blader_name} size={32} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14.5, fontWeight: 600 }}>{b.blader_name}</div>
+                    <div style={{ fontSize: 11.5, color: C.muted }}>
+                      {b.real_name ? `${b.real_name} · ` : ""}looks like their {on}
+                      {elsewhere ? " · chosen for another name" : ""}
+                    </div>
+                  </div>
+                  {picked && <Check size={16} color={C.green} />}
+                </button>
+              );
+            })}
+            <button onClick={() => decide(c.key, choice[c.key] === false ? undefined : false)}
+              style={{
+                padding: "8px 10px", borderRadius: 3, textAlign: "left", fontSize: 13.5, cursor: "pointer",
+                background: choice[c.key] === false ? `${C.magenta}14` : "transparent", color: C.ink,
+                border: `1px solid ${choice[c.key] === false ? C.magenta : C.line}`,
+              }}>
+              None of these — keep “{c.label}” as a name
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+        <Btn tone="primary" disabled={undecided > 0} onClick={() => finish(false)}>
+          <Check size={15} />{undecided > 0 ? `${undecided} still to decide` : "Add them"}
+        </Btn>
+        {undecided > 0 && (
+          <Btn onClick={() => finish(true)}>Keep the rest as names</Btn>
+        )}
+        <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
+      </div>
+    </SheetFrame>,
+    document.body,
   );
 }
 

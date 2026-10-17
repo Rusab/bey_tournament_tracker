@@ -304,6 +304,19 @@ export async function findBlader(email, eventId = null) {
   return { blader: row || null };
 }
 
+/**
+ * Everyone registered, for choosing from. Real names come back only for
+ * someone allowed to see them; for anyone else that field is null. Falls
+ * back to the plain public list, without real names, if the function has not
+ * been installed yet — the picker still works, matching on blader names alone.
+ */
+export async function bladerDirectory() {
+  const { data, error } = await supabase.rpc("blader_directory");
+  if (!error) return data || [];
+  const plain = await listBladers();
+  return plain ? plain.map((b) => ({ ...b, real_name: null })) : null;
+}
+
 /** Every tournament this blader was linked into, newest first, with its data. */
 export async function bladerEvents(id) {
   const { data, error } = await supabase.rpc("blader_events", { p_id: id });
