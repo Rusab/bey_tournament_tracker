@@ -12,6 +12,7 @@ import {
   eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
   listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
   avatarUrl, uploadAvatar, removeAvatar,
+  bladerNames, listMedals, amAwarder, addMedal, removeMedal,
 } from "./lib/db.js";
 
 /* ================================================================== */
@@ -4053,13 +4054,27 @@ function BladersSheet({ onOpen, onClose }) {
  * One blader's profile. The real name row appears only when the database
  * hands one back, which it does for the blader, organisers and staff.
  */
-function BladerSheet({ id, meId, onClose, onEdit }) {
+function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward }) {
   const [b, setB] = useState(undefined);
   const [real, setReal] = useState(null);
+  const [medals, setMedals] = useState(undefined);
+  const [names, setNames] = useState({});        // teammates, by id
+  const [dropping, setDropping] = useState(null); // the medal being removed
+  const [err, setErr] = useState(null);
+
+  const loadMedals = () => listMedals(id).then(async (rows) => {
+    setMedals(rows);
+    if (rows) setNames(await bladerNames(rows.map((m) => m.teammate_id)));
+  });
+
   useEffect(() => {
     loadBlader(id).then(setB);
     if (meId) bladerRealName(id).then(setReal);
+    loadMedals();
   }, [id, meId]);
+
+  // Taken back by whoever gave it, or by staff — the same rule the database applies.
+  const canRemove = (m) => canAward && (m.awarded_by === meId || isStaff);
 
   const mine = meId && meId === id;
   const Row = ({ label, children, note }) => (
@@ -4098,13 +4113,232 @@ function BladerSheet({ id, meId, onClose, onEdit }) {
             {b.favorite_combo || <span style={{ color: C.muted }}>Not given</span>}
           </Row>
 
-          {mine && (
-            <Btn onClick={onEdit} tone="primary" style={{ marginTop: 18 }}>
-              <Pencil size={15} />Edit profile
-            </Btn>
+          {(mine || canAward) && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 18 }}>
+              {mine && (
+                <Btn onClick={onEdit} tone="primary"><Pencil size={15} />Edit profile</Btn>
+              )}
+              {canAward && (
+                <Btn onClick={() => onAward(b)}><Medal size={15} />Add medal</Btn>
+              )}
+            </div>
           )}
+
+          <div style={{ marginTop: 26 }}>
+            {medals === undefined ? (
+              <div style={{ color: C.muted, fontSize: 14 }}>Loading medals…</div>
+            ) : medals === null ? (
+              <div style={{ color: C.muted, fontSize: 14 }}>Medals could not be loaded.</div>
+            ) : (
+              <MedalBoard medals={medals} names={names} canRemove={canRemove} onRemove={setDropping} />
+            )}
+            {err && <div style={{ color: C.magenta, fontSize: 13.5, marginTop: 10 }}>{err}</div>}
+          </div>
         </>
       )}
+
+      {dropping && (
+        <Confirm
+          title="Remove this medal?"
+          body={`${PLACE_LABEL[dropping.place]} at ${dropping.tournament_name}. It comes off ${b ? b.blader_name : "this"}'s profile`
+            + (dropping.teammate_id ? "; their teammate keeps theirs unless you remove that one too." : ".")}
+          confirmLabel="Remove" tone="danger"
+          onConfirm={async () => {
+            const m = dropping;
+            setDropping(null); setErr(null);
+            const { error } = await removeMedal(m.id);
+            if (error) setErr(error.message);
+            loadMedals();
+          }}
+          onClose={() => setDropping(null)}
+        />
+      )}
+    </SheetFrame>
+  );
+}
+
+const PLACES = ["first", "second", "third", "swiss"];
+const PLACE_LABEL = { first: "1st Place", second: "2nd Place", third: "3rd Place", swiss: "Swiss Medal" };
+const PLACE_COLOR = { first: C.gold, second: "#C9CED6", third: "#C87941", swiss: C.cyan };
+
+/*
+ * Seasons newest first, by the number in them, so S10 comes before S9.
+ * Anything without a number keeps its place behind those that have one.
+ */
+const seasonOrder = (a, b) => {
+  const na = parseInt(String(a).replace(/[^0-9]/g, ""), 10);
+  const nb = parseInt(String(b).replace(/[^0-9]/g, ""), 10);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na;
+  if (Number.isFinite(na) !== Number.isFinite(nb)) return Number.isFinite(na) ? -1 : 1;
+  return String(a).localeCompare(String(b));
+};
+
+/**
+ * A blader's podium record, one list per season. Each place shows how many,
+ * and opens to the tournaments behind the number. With no medals at all the
+ * S1 list still shows, at zero, so the shape of the record is always there.
+ */
+function MedalBoard({ medals, names, canRemove, onRemove }) {
+  const [open, setOpen] = useState(null);   // "season|place"
+  const seasons = [...new Set(medals.map((m) => m.season))].sort(seasonOrder);
+  if (!seasons.length) seasons.push("S1");
+
+  return seasons.map((season) => {
+    const here = medals.filter((m) => m.season === season);
+    return (
+      <div key={season} style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9 }}>
+          <Blade color={C.gold} h={16} />
+          <div className="bx-d" style={{ fontSize: 17, fontWeight: 700 }}>
+            {season} Regular Tournament Podium List
+          </div>
+        </div>
+        {PLACES.map((place) => {
+          const list = here.filter((m) => m.place === place);
+          const key = `${season}|${place}`;
+          const isOpen = open === key && list.length > 0;
+          const col = PLACE_COLOR[place];
+          return (
+            <div key={place} style={{
+              background: C.surface, border: `1px solid ${C.line}`, borderLeft: `3px solid ${col}`,
+              borderRadius: 3, marginBottom: 6,
+            }}>
+              <button onClick={() => setOpen(isOpen ? null : key)} disabled={!list.length}
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "11px 12px",
+                  background: "none", border: "none", color: C.ink, textAlign: "left",
+                  cursor: list.length ? "pointer" : "default",
+                }}>
+                <Medal size={17} color={col} />
+                <span style={{ flex: 1, fontSize: 15 }}>{PLACE_LABEL[place]}</span>
+                <span className="bx-d" style={{ fontSize: 20, fontWeight: 800, color: list.length ? C.ink : C.muted }}>
+                  {list.length}
+                </span>
+                {list.length > 0 && (
+                  <ChevronRight size={15} color={C.muted}
+                    style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+                )}
+              </button>
+              {isOpen && (
+                <div style={{ borderTop: `1px solid ${C.line}66`, padding: "4px 12px 8px" }}>
+                  {list.map((m) => (
+                    <div key={m.id} style={{
+                      display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                      borderBottom: `1px solid ${C.line}33`,
+                    }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14.5 }}>{m.tournament_name}</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>
+                          {m.organiser_name}
+                          {m.teammate_id && names[m.teammate_id] ? ` · with ${names[m.teammate_id]}` : ""}
+                        </div>
+                      </div>
+                      {canRemove(m) && (
+                        <button onClick={() => onRemove(m)} aria-label="Remove medal"
+                          style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 4 }}>
+                          <Trash2 size={15} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  });
+}
+
+/**
+ * Giving a medal. Tournaments and organisers already in the app are offered
+ * as suggestions, and picking a known tournament fills in who ran it; any
+ * other name can still be typed, for events that were never run here.
+ */
+function MedalSheet({ blader, directory, onClose, onSaved }) {
+  const [place, setPlace] = useState("first");
+  const [tournament, setTournament] = useState("");
+  const [organiser, setOrganiser] = useState("");
+  const [season, setSeason] = useState("S1");
+  const [teammate, setTeammate] = useState("");
+  const [others, setOthers] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  useEffect(() => {
+    listBladers().then((rows) => setOthers((rows || []).filter((r) => r.id !== blader.id)));
+  }, [blader.id]);
+
+  const tournaments = [...new Set((directory || []).map((e) => e.name))];
+  const organisers = [...new Set((directory || []).map((e) => e.organiser))];
+
+  const pickTournament = (v) => {
+    setTournament(v);
+    const hit = (directory || []).find((e) => e.name === v);
+    if (hit && !organiser.trim()) setOrganiser(hit.organiser);
+  };
+
+  const save = async () => {
+    const t = tournament.trim(), o = organiser.trim(), s = season.trim();
+    const bad = !t ? "Which tournament was it?"
+      : t.length > 80 ? "Keep the tournament name to 80 characters."
+      : !o ? "Who organised it?"
+      : o.length > 60 ? "Keep the organiser to 60 characters."
+      : !s ? "Which season?"
+      : s.length > 20 ? "Keep the season to 20 characters."
+      : null;
+    if (bad) { setMsg(bad); return; }
+    setBusy(true); setMsg(null);
+    const { error } = await addMedal({
+      bladerId: blader.id, teammateId: teammate || null,
+      place, tournamentName: t, organiserName: o, season: s,
+    });
+    if (error) { setBusy(false); setMsg(error.message || "That medal could not be saved."); return; }
+    onSaved();
+  };
+
+  return (
+    <SheetFrame title="Add medal" onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+        <Avatar path={blader.photo_path} name={blader.blader_name} size={44} />
+        <div className="bx-d" style={{ fontSize: 20, fontWeight: 800 }}>{blader.blader_name}</div>
+      </div>
+
+      <div style={{ marginBottom: 18 }}>
+        <div className="bx-d" style={{ fontSize: 15, marginBottom: 7, fontWeight: 600 }}>Place</div>
+        <Segmented value={place} onChange={setPlace} tone={PLACE_COLOR[place]}
+          options={PLACES.map((p) => ({ value: p, label: p === "swiss" ? "Swiss" : PLACE_LABEL[p].replace(" Place", "") }))} />
+      </div>
+
+      <Field label="Tournament">
+        <input style={inputStyle} maxLength={80} value={tournament} list="medal-tournaments"
+          onChange={(e) => pickTournament(e.target.value)} placeholder="Tournament name" />
+        <datalist id="medal-tournaments">{tournaments.map((n) => <option key={n} value={n} />)}</datalist>
+      </Field>
+      <Field label="Organiser">
+        <input style={inputStyle} maxLength={60} value={organiser} list="medal-organisers"
+          onChange={(e) => setOrganiser(e.target.value)} placeholder="Who ran it" />
+        <datalist id="medal-organisers">{organisers.map((n) => <option key={n} value={n} />)}</datalist>
+      </Field>
+      <Field label="Season">
+        <input style={inputStyle} maxLength={20} value={season} onChange={(e) => setSeason(e.target.value)} />
+      </Field>
+      <Field label="Also award to teammate" hint="Tag team only. Their partner gets the same medal on their own profile.">
+        <select style={inputStyle} value={teammate} onChange={(e) => setTeammate(e.target.value)}>
+          <option value="">— nobody, singles —</option>
+          {others.map((r) => <option key={r.id} value={r.id}>{r.blader_name}</option>)}
+        </select>
+      </Field>
+
+      {msg && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12, lineHeight: 1.5 }}>{msg}</div>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn onClick={save} tone="primary" disabled={busy}>
+          <Medal size={15} />{busy ? "Saving…" : teammate ? "Award to both" : "Award medal"}
+        </Btn>
+        <Btn onClick={onClose} tone="ghost" disabled={busy}>Cancel</Btn>
+      </div>
     </SheetFrame>
   );
 }
@@ -4487,6 +4721,8 @@ export default function App() {
   const [viewBlader, setViewBlader] = useState(null);  // whose profile is open
   const [editing, setEditing] = useState(false);
   const [bladerVersion, setBladerVersion] = useState(0);  // bumped after an edit, to reload
+  const [awarder, setAwarder] = useState(false);       // holds medal access
+  const [awarding, setAwarding] = useState(null);      // the blader a medal is being given to
 
   useEffect(() => {
     currentSession().then(setSession);
@@ -4498,12 +4734,13 @@ export default function App() {
   useEffect(() => { publicEvents().then(setDirectory); }, []);
 
   useEffect(() => {
-    if (!session) { setProfile(null); setEvents([]); setMe(null); return; }
+    if (!session) { setProfile(null); setEvents([]); setMe(null); setAwarder(false); return; }
     // The blader row is made by ensure_profile, which loadProfile runs, so it
     // is only asked for once that has finished.
     loadProfile(session.user.id).then((p) => {
       setProfile(p);
       loadBlader(session.user.id).then(setMe);
+      amAwarder().then(setAwarder);
     });
     myEvents(session.user.id).then(setEvents);
     setSigningIn(false);
@@ -4607,7 +4844,14 @@ export default function App() {
       {viewBlader && (
         <BladerSheet key={`${viewBlader}:${bladerVersion}`} id={viewBlader}
           meId={session ? session.user.id : null}
-          onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)} />
+          canAward={awarder} isStaff={!!(profile && profile.is_staff)}
+          onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)}
+          onAward={setAwarding} />
+      )}
+      {awarding && awarder && (
+        <MedalSheet blader={awarding} directory={directory}
+          onClose={() => setAwarding(null)}
+          onSaved={() => { setAwarding(null); setBladerVersion((v) => v + 1); }} />
       )}
       {editing && me && session && (
         <ProfileEditSheet meId={session.user.id} blader={me}

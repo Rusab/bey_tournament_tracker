@@ -280,6 +280,59 @@ export async function removeAvatar(path) {
   if (error) console.error(error);
 }
 
+/** Blader names for a handful of ids, as { id: name }. */
+export async function bladerNames(ids) {
+  const want = [...new Set(ids.filter(Boolean))];
+  if (!want.length) return {};
+  const { data, error } = await supabase.from("bladers").select("id, blader_name").in("id", want);
+  if (error) { console.error(error); return {}; }
+  return Object.fromEntries(data.map((r) => [r.id, r.blader_name]));
+}
+
+/* ------------------------------------------------------------------- medals */
+
+/*
+ * Entered by hand, and only by an account given medal access — a permission
+ * of its own, separate from hosting and from staff. The database enforces it;
+ * these calls just fail for anyone else.
+ */
+
+const MEDAL_COLS = "id, blader_id, place, tournament_name, organiser_name, season, teammate_id, awarded_by, created_at";
+
+export async function listMedals(bladerId) {
+  const { data, error } = await supabase
+    .from("medals").select(MEDAL_COLS).eq("blader_id", bladerId)
+    .order("created_at", { ascending: false });
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+/** False on any failure, which includes the medals script not having run yet. */
+export async function amAwarder() {
+  const { data, error } = await supabase.rpc("is_awarder");
+  if (error) return false;
+  return !!data;
+}
+
+/**
+ * One row per blader. A tag team medal goes to both members in the same
+ * statement, so either both get it or neither does, each naming the other.
+ */
+export async function addMedal({ bladerId, teammateId, place, tournamentName, organiserName, season }) {
+  const base = { place, tournament_name: tournamentName, organiser_name: organiserName, season };
+  const rows = [{ ...base, blader_id: bladerId, teammate_id: teammateId || null }];
+  if (teammateId) rows.push({ ...base, blader_id: teammateId, teammate_id: bladerId });
+  const { error } = await supabase.from("medals").insert(rows);
+  return { error };
+}
+
+export async function removeMedal(id) {
+  const { data, error } = await supabase.from("medals").delete().eq("id", id).select("id");
+  if (error) return { error };
+  if (!data || !data.length) return { error: new Error("That medal could not be removed.") };
+  return {};
+}
+
 /* -------------------------------------------------------------------- staff */
 
 export async function pendingHosts() {
