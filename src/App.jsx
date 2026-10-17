@@ -5,10 +5,11 @@ import {
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
   Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2,
 } from "lucide-react";
-import { supabase } from "./lib/supabase.js";
+import { supabase, arrival } from "./lib/supabase.js";
 import {
   loadEvent, eventStamp, saveEvent, subscribeEvent,
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
+  sendPasswordReset, setPassword,
   myEvents, publicEvents, createEvent, archiveEvent, deleteEvent,
   eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
   listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
@@ -4066,8 +4067,8 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
  * account exists, unapproved, and can be added as a referee. Hosting waits
  * on approval, which is a staff action in the database.
  */
-function AuthScreen({ onDone, onBack }) {
-  const [mode, setMode] = useState("in");   // "in" | "up"
+function AuthScreen({ onDone, onBack, startMode = "in" }) {
+  const [mode, setMode] = useState(startMode);   // "in" | "up" | "forgot"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [bladerName, setBladerName] = useState("");
@@ -4075,7 +4076,24 @@ function AuthScreen({ onDone, onBack }) {
   const [msg, setMsg] = useState(null);     // { tone, text }
   const [busy, setBusy] = useState(false);
 
+  // Says the same whether or not an account uses the address, so the form
+  // cannot be used to find out who has signed up.
+  const sendReset = async () => {
+    if (busy) return;
+    if (!email.trim()) { setMsg({ tone: C.magenta, text: "Enter the email you signed up with." }); return; }
+    setBusy(true); setMsg(null);
+    const { error } = await sendPasswordReset(email);
+    setBusy(false);
+    if (error && /rate|seconds/i.test(error.message || "")) {
+      setMsg({ tone: C.magenta, text: "A link was sent a moment ago. Wait a minute before asking for another." });
+      return;
+    }
+    if (error) { setMsg({ tone: C.magenta, text: "The reset email could not be sent just now. Try again shortly." }); return; }
+    setMsg({ tone: C.green, text: "If an account uses that address, a reset link is on its way. Check your spam folder too." });
+  };
+
   const submit = async () => {
+    if (mode === "forgot") return sendReset();
     if (busy || !email.trim() || !password) return;
     const bn = bladerName.trim(), rn = realName.trim();
     if (mode === "up") {
@@ -4134,8 +4152,13 @@ function AuthScreen({ onDone, onBack }) {
           background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 48%, ${C.cyan} 100%)`,
           WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
         }}>
-          {mode === "in" ? "Sign in" : "Sign up"}
+          {mode === "in" ? "Sign in" : mode === "up" ? "Sign up" : "Reset password"}
         </h1>
+        {mode === "forgot" && (
+          <div style={{ fontSize: 13.5, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
+            Enter the email you signed up with and we will send a link to choose a new password.
+          </div>
+        )}
 
         {mode === "up" && (
           <>
@@ -4159,25 +4182,35 @@ function AuthScreen({ onDone, onBack }) {
           value={email} onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
           onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Email"
         />
-        <input
-          style={inputStyle} type="password"
-          autoComplete={mode === "in" ? "current-password" : "new-password"}
-          value={password} onChange={(e) => { setPassword(e.target.value); setMsg(null); }}
-          onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Password"
-        />
+        {mode !== "forgot" && (
+          <input
+            style={inputStyle} type="password"
+            autoComplete={mode === "in" ? "current-password" : "new-password"}
+            value={password} onChange={(e) => { setPassword(e.target.value); setMsg(null); }}
+            onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Password"
+          />
+        )}
+        {mode === "in" && (
+          <div style={{ textAlign: "right", marginTop: 8 }}>
+            <button onClick={() => { setMode("forgot"); setMsg(null); }}
+              style={{ background: "none", border: "none", color: C.cyan, cursor: "pointer", fontSize: 13, padding: 0 }}>
+              Forgot your password?
+            </button>
+          </div>
+        )}
         {msg && (
           <div style={{ color: msg.tone, fontSize: 13, marginTop: 10, lineHeight: 1.5 }}>{msg.text}</div>
         )}
 
         <Btn onClick={submit} tone="primary" disabled={busy}
           style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 17, marginTop: 16 }}>
-          {busy ? "Working…" : mode === "in" ? "Sign in" : "Create account"}
+          {busy ? "Working…" : mode === "in" ? "Sign in" : mode === "up" ? "Create account" : "Send reset link"}
         </Btn>
 
         <div style={{ textAlign: "center", marginTop: 14 }}>
           <button onClick={() => { setMode(mode === "in" ? "up" : "in"); setMsg(null); }}
             style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13.5 }}>
-            {mode === "in" ? "No account yet? Sign up" : "Already have an account? Sign in"}
+            {mode === "in" ? "No account yet? Sign up" : mode === "up" ? "Already have an account? Sign in" : "Back to sign in"}
           </button>
         </div>
       </div>
@@ -4185,6 +4218,100 @@ function AuthScreen({ onDone, onBack }) {
   );
 }
 
+
+/**
+ * Where a password-reset link lands. The link has already signed the person
+ * in by the time this shows, so all that is left is the new password. A link
+ * that has expired or been used arrives with no session, and says so.
+ */
+function ResetPasswordScreen({ session, failure, onDone, onRequestNew }) {
+  const [pw, setPw] = useState("");
+  const [again, setAgain] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const save = async () => {
+    if (busy) return;
+    const bad = pw.length < 6 ? "Use at least 6 characters."
+      : pw !== again ? "The two passwords are not the same."
+      : null;
+    if (bad) { setMsg(bad); return; }
+    setBusy(true); setMsg(null);
+    const { error } = await setPassword(pw);
+    setBusy(false);
+    if (error) {
+      setMsg(/different from the old/i.test(error.message || "")
+        ? "That is your current password. Choose a different one."
+        : error.message || "The password could not be changed.");
+      return;
+    }
+    setDone(true);
+  };
+
+  const frame = (body) => (
+    <div className="bx" style={{ ...shell, display: "grid", placeItems: "center", padding: 20, paddingTop: safeTop("20px") }}>
+      <Style />
+      <div style={{ width: "100%", maxWidth: 380 }}>
+        <h1 className="bx-d" style={{
+          fontSize: 40, fontWeight: 800, margin: "0 0 14px", lineHeight: .95,
+          background: `linear-gradient(100deg, ${C.magenta} 0%, #FFFFFF 48%, ${C.cyan} 100%)`,
+          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+        }}>New password</h1>
+        {body}
+      </div>
+    </div>
+  );
+
+  if (session === undefined) return frame(<div style={{ color: C.muted }}>Checking your link…</div>);
+
+  if (!session) {
+    return frame(
+      <>
+        <div style={{ fontSize: 14, lineHeight: 1.55, marginBottom: 16 }}>
+          This reset link has expired or has already been used.
+          {failure ? <span style={{ color: C.muted }}> ({failure})</span> : null}
+        </div>
+        <Btn tone="primary" onClick={onRequestNew}
+          style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 16 }}>
+          Send a new link
+        </Btn>
+      </>
+    );
+  }
+
+  if (done) {
+    return frame(
+      <>
+        <div style={{ fontSize: 14.5, lineHeight: 1.55, marginBottom: 16, color: C.green }}>
+          Your password has been changed, and you are signed in.
+        </div>
+        <Btn tone="primary" onClick={onDone}
+          style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 16 }}>
+          Continue
+        </Btn>
+      </>
+    );
+  }
+
+  return frame(
+    <>
+      <div style={{ fontSize: 13.5, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
+        Choose a new password for {session.user.email}.
+      </div>
+      <input style={{ ...inputStyle, marginBottom: 10 }} type="password" autoComplete="new-password"
+        value={pw} onChange={(e) => { setPw(e.target.value); setMsg(null); }} placeholder="New password" />
+      <input style={inputStyle} type="password" autoComplete="new-password"
+        value={again} onChange={(e) => { setAgain(e.target.value); setMsg(null); }}
+        onKeyDown={(e) => e.key === "Enter" && save()} placeholder="New password again" />
+      {msg && <div style={{ color: C.magenta, fontSize: 13, marginTop: 10, lineHeight: 1.5 }}>{msg}</div>}
+      <Btn tone="primary" onClick={save} disabled={busy}
+        style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 17, marginTop: 16 }}>
+        {busy ? "Saving…" : "Set new password"}
+      </Btn>
+    </>
+  );
+}
 
 /** What a spectator sees before the organiser has created anything. */
 function NotLive({ onUnlock }) {
@@ -5352,6 +5479,13 @@ export default function App() {
   const [sheet, setSheet] = useState(null);            // "referees" | "approvals"
   const [directory, setDirectory] = useState([]);      // every live tournament
   const [signingIn, setSigningIn] = useState(false);
+  const [authMode, setAuthMode] = useState("in");
+  // Landed from a reset link: told by the address, so it cannot be missed.
+  const [recovering, setRecovering] = useState(() => arrival.path === "/reset");
+  const resetFailure = useMemo(() => {
+    const h = new URLSearchParams(String(arrival.hash || "").replace(/^#/, ""));
+    return h.get("error_description") || null;
+  }, []);
   const [me, setMe] = useState(null);                  // this account's public blader row
   const [viewBlader, setViewBlader] = useState(null);  // whose profile is open
   const [editing, setEditing] = useState(false);
@@ -5361,7 +5495,10 @@ export default function App() {
 
   useEffect(() => {
     currentSession().then(setSession);
-    return onAuthChange(setSession);
+    return onAuthChange((s, event) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+    });
   }, []);
 
   // The directory is public, so it loads for everyone and does not wait on a
@@ -5436,8 +5573,19 @@ export default function App() {
     );
   }
 
+  if (recovering) {
+    const leave = () => { history.replaceState({}, "", "/"); setRecovering(false); };
+    return (
+      <ResetPasswordScreen session={session} failure={resetFailure}
+        onDone={leave}
+        onRequestNew={() => { leave(); setAuthMode("forgot"); setSigningIn(true); }} />
+    );
+  }
+
   if (signingIn && !session) {
-    return <AuthScreen onDone={() => setSigningIn(false)} onBack={() => setSigningIn(false)} />;
+    return <AuthScreen key={authMode} startMode={authMode}
+      onDone={() => { setSigningIn(false); setAuthMode("in"); }}
+      onBack={() => { setSigningIn(false); setAuthMode("in"); }} />;
   }
 
   if (making) {

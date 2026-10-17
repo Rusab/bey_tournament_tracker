@@ -16,8 +16,9 @@ export async function currentSession() {
   return data.session || null;
 }
 
+/** Called with the session and the event that changed it, such as PASSWORD_RECOVERY. */
 export function onAuthChange(fn) {
-  const { data } = supabase.auth.onAuthStateChange((_e, session) => fn(session || null));
+  const { data } = supabase.auth.onAuthStateChange((event, session) => fn(session || null, event));
   return () => data.subscription.unsubscribe();
 }
 
@@ -50,6 +51,20 @@ export const signUp = (email, password, { bladerName, realName } = {}) =>
   });
 
 export const signOut = () => supabase.auth.signOut();
+
+/*
+ * The link in the email comes back to /reset, an address of its own, so the
+ * app knows a reset is under way from where it landed. Supabase also says so
+ * with an event, but only once and while still starting, which can be before
+ * anything is listening. Covered by the allow-listed /** redirect.
+ */
+export const sendPasswordReset = (email) =>
+  supabase.auth.resetPasswordForEmail(email.trim(), {
+    redirectTo: `${window.location.origin}/reset`,
+  });
+
+/** Needs the session the reset link signs the person in with. */
+export const setPassword = (password) => supabase.auth.updateUser({ password });
 
 /**
  * The profile row is created here rather than by a trigger on auth.users,
