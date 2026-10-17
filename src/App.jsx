@@ -3884,6 +3884,9 @@ function SheetFrame({ title, onClose, children }) {
   return (
     <div className="bx" {...swipeBack} style={{
       position: "fixed", inset: 0, zIndex: 60, ...arenaStyle(null), overflowY: "auto",
+      // Set here, not inherited: opened from the tournament list, a sheet sits
+      // outside anything that sets the text colour and would draw in black.
+      color: C.ink,
     }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
@@ -4094,7 +4097,6 @@ function BladerSheet({ id, meId, onClose, onEdit }) {
           <Row label="Favourite combo">
             {b.favorite_combo || <span style={{ color: C.muted }}>Not given</span>}
           </Row>
-          <Row label="Blading here since">{new Date(b.created_at).toLocaleDateString()}</Row>
 
           {mine && (
             <Btn onClick={onEdit} tone="primary" style={{ marginTop: 18 }}>
