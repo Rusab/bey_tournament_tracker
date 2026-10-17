@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera,
+  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2,
 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 import {
@@ -13,6 +13,7 @@ import {
   listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
   avatarUrl, uploadAvatar, removeAvatar,
   bladerNames, listMedals, amAwarder, addMedal, removeMedal,
+  findBlader, bladerEvents,
 } from "./lib/db.js";
 
 /* ================================================================== */
@@ -75,6 +76,79 @@ const membersOf = (t, id) => {
 };
 
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+/*
+ * A tournament player can be linked to a profile: `profileId` on a blader,
+ * and on a team `memberIds`, one per member in the same order as `members`.
+ * Both are optional — an unlinked player is exactly what it always was, and
+ * everything that draws, scores or ranks still reads only the name.
+ */
+const looksLikeEmail = (s) => {
+  const v = String(s || "").trim();
+  const at = v.indexOf("@");
+  return at > 0 && at === v.lastIndexOf("@") && !v.includes(" ")
+    && v.indexOf(".", at) > at + 1 && !v.endsWith(".");
+};
+
+/** Every profile already linked somewhere among these players. */
+const linkedIds = (players) =>
+  new Set((players || []).flatMap((p) => [p.profileId, ...(p.memberIds || [])]).filter(Boolean));
+
+const isLinked = (p) => !!(p.profileId || (p.memberIds || []).some(Boolean));
+
+/**
+ * One typed line into a player, looking up any email in it. A blader is a
+ * name or an email. A team is "Name: member, member", each member a name or
+ * an email. Resolves to { player }, { error } or {} for a blank line.
+ *
+ * `taken` is never changed here: a line that fails part-way must not leave
+ * its first member marked as already in, or adding it again would be refused.
+ */
+async function resolveEntry(line, { eventId, taken }) {
+  const raw = String(line || "").trim();
+  if (!raw) return {};
+  const mine = new Set();
+  const lookup = async (email) => {
+    const { blader, error } = await findBlader(email.trim(), eventId);
+    if (error) return { error: "Emails could not be looked up just now." };
+    if (!blader) return { error: `No account uses ${email.trim()}.` };
+    if (taken.has(blader.id) || mine.has(blader.id)) {
+      return { error: `${blader.blader_name} is already in this tournament.` };
+    }
+    mine.add(blader.id);
+    return { blader };
+  };
+
+  // Same split as always: a colon makes a team, whatever the format.
+  if (raw.includes(":")) {
+    const [head, tail] = raw.split(/:(.+)/);
+    const name = (head || "").trim().replace(/:+$/, "").trim();
+    if (!name) return {};
+    const members = [], memberIds = [];
+    for (const m of (tail || "").split(",").map((x) => x.trim()).filter(Boolean)) {
+      if (looksLikeEmail(m)) {
+        const r = await lookup(m);
+        if (r.error) return { error: r.error };
+        members.push(r.blader.blader_name); memberIds.push(r.blader.id);
+      } else {
+        members.push(m); memberIds.push(null);
+      }
+    }
+    const player = { id: uid(), name };
+    if (members.length) {
+      player.members = members;
+      if (memberIds.some(Boolean)) player.memberIds = memberIds;
+    }
+    return { player };
+  }
+
+  if (looksLikeEmail(raw)) {
+    const r = await lookup(raw);
+    if (r.error) return { error: r.error };
+    return { player: { id: uid(), name: r.blader.blader_name, profileId: r.blader.id } };
+  }
+  return { player: { id: uid(), name: raw } };
+}
 
 /*
  * The board reads and writes one tournament, named by id. Which tournaments an
@@ -1532,7 +1606,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       }}>
         {/* Keyed on the tab so the entrance animation restarts on every change. */}
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
-          {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} />}
+          {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} eventId={eventId} />}
           {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
             group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
@@ -1591,7 +1665,8 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       )}
       {detail && (
         <PlayerSheet playerId={detail} t={t} nameOf={nameOf}
-          allMatches={allMatches} onClose={() => setDetail(null)} />
+          allMatches={allMatches} onClose={() => setDetail(null)}
+          isAdmin={isAdmin} update={update} eventId={eventId} />
       )}
       {showSetup && isAdmin && (
         <SettingsSheet t={t} update={update} onClose={() => setShowSetup(false)}
@@ -1745,33 +1820,42 @@ function Setup({ onCreate }) {
   const [bgUrl, setBgUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
 
-  /*
-   * One line becomes one competitor. In a tag tournament "Ronin: Ayo, Bex"
-   * carries its members along, but it stays a single entrant everywhere else —
-   * the draw, the bracket and the scoring never learn the difference.
-   */
-  const parseEntry = (line) => {
-    const [head, tail] = String(line).split(/:(.+)/);
-    // A colon with nothing after it does not split, so it would otherwise stay
-    // stuck to the name and the team would be called "Ronin:".
-    const nm = (head || "").trim().replace(/:+$/, "").trim();
-    if (!nm) return null;
-    const members = (tail || "").split(",").map((x) => x.trim()).filter(Boolean);
-    return members.length ? { id: uid(), name: nm, members } : { id: uid(), name: nm };
-  };
+  const [entryMsg, setEntryMsg] = useState(null);
+  const [adding, setAdding] = useState(false);
 
-  const addPlayer = () => {
-    const one = parseEntry(entry);
-    if (!one) return;
-    setPlayers((p) => [...p, one]);
+  const addPlayer = async () => {
+    if (adding || !entry.trim()) return;
+    setAdding(true); setEntryMsg(null);
+    const r = await resolveEntry(entry, { eventId: null, taken: linkedIds(players) });
+    setAdding(false);
+    if (r.error) { setEntryMsg(r.error); return; }
+    if (!r.player) return;
+    setPlayers((p) => [...p, r.player]);
     setEntry("");
   };
-  const addBulk = () => {
-    // Commas separate members, so a pasted list splits on line breaks alone.
-    const rows = bulk.split(/\n/).map(parseEntry).filter(Boolean);
-    if (!rows.length) return;
-    setPlayers((p) => [...p, ...rows]);
-    setBulk("");
+  /*
+   * Commas separate members, so a pasted list splits on line breaks alone.
+   * Lines that fail stay in the box with the reason, so they can be fixed
+   * and added again; the rest go in.
+   */
+  const addBulk = async () => {
+    if (adding) return;
+    const lines = bulk.split(/\n/).map((x) => x.trim()).filter(Boolean);
+    if (!lines.length) return;
+    setAdding(true); setEntryMsg(null);
+    const taken = linkedIds(players);
+    const added = [], left = [], why = [];
+    for (const line of lines) {
+      const r = await resolveEntry(line, { eventId: null, taken });
+      if (r.error) { left.push(line); why.push(r.error); continue; }
+      if (!r.player) continue;
+      [r.player.profileId, ...(r.player.memberIds || [])].filter(Boolean).forEach((id) => taken.add(id));
+      added.push(r.player);
+    }
+    setAdding(false);
+    if (added.length) setPlayers((p) => [...p, ...added]);
+    setBulk(left.join("\n"));
+    if (why.length) setEntryMsg(why.join(" "));
   };
 
   const league = format === "league";
@@ -1895,9 +1979,15 @@ function Setup({ onCreate }) {
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} value={entry} onChange={(e) => setEntry(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addPlayer()}
-              placeholder={format === "tag" ? "Ronin: Ayo, Bex" : "Add a name"} />
-            <Btn onClick={addPlayer} tone="primary" style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
+              placeholder={format === "tag" ? "Ronin: Ayo, bex@email.com" : "A name, or their email"} />
+            <Btn onClick={addPlayer} tone="primary" disabled={adding} style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
           </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 6, lineHeight: 1.45 }}>
+            Type the email someone signed up with instead of a name to link their blader profile.
+          </div>
+          {entryMsg && (
+            <div style={{ fontSize: 13, color: C.magenta, marginTop: 6, lineHeight: 1.45 }}>{entryMsg}</div>
+          )}
           {players.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
               {players.map((p) => (
@@ -1906,6 +1996,7 @@ function Setup({ onCreate }) {
                   border: `1px solid ${C.line}`, borderRadius: 3, padding: "6px 9px", fontSize: 14,
                 }}>
                   <span>
+                    {isLinked(p) && <Link2 size={12} color={C.cyan} style={{ marginRight: 4, verticalAlign: "-1px" }} />}
                     {p.name}
                     {p.members && (
                       <span style={{ color: C.muted, fontSize: 12 }}> · {p.members.join(", ")}</span>
@@ -2037,7 +2128,7 @@ function Setup({ onCreate }) {
 /*  Groups                                                             */
 /* ================================================================== */
 
-function GroupsView({ t, update, nameOf, isAdmin }) {
+function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
   const [moving, setMoving] = useState(null);
   const [ask, setAsk] = useState(null);         // null | "redraw" | "blocked"
   const [pending, setPending] = useState(null); // a move/remove awaiting confirmation
@@ -2086,11 +2177,18 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
   const inBracket = (pid) =>
     bracketMatches(t.bracket).some((m) => m.p1 === pid || m.p2 === pid);
 
-  const addPlayer = () => {
-    const name = entry.trim();
-    if (!name) return;
+  const [entryMsg, setEntryMsg] = useState(null);
+  const [adding, setAdding] = useState(false);
+
+  const addPlayer = async () => {
+    if (adding || !entry.trim()) return;
+    setAdding(true); setEntryMsg(null);
+    const r = await resolveEntry(entry, { eventId, taken: linkedIds(t.players) });
+    setAdding(false);
+    if (r.error) { setEntryMsg(r.error); return; }
+    if (!r.player) return;
     // Placed outside the groups, so putting them somewhere stays a decision.
-    update((d) => { d.players.push({ id: uid(), name }); return d; });
+    update((d) => { d.players.push(r.player); return d; });
     setEntry("");
   };
 
@@ -2189,9 +2287,12 @@ function GroupsView({ t, update, nameOf, isAdmin }) {
           <div className="bx-d" style={{ fontSize: 16, fontWeight: 700, marginBottom: 9 }}>Add a blader</div>
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} value={entry} onChange={(e) => setEntry(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="Name" />
-            <Btn onClick={addPlayer} tone="primary" style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
+              onKeyDown={(e) => e.key === "Enter" && addPlayer()} placeholder="A name, or their email" />
+            <Btn onClick={addPlayer} tone="primary" disabled={adding} style={{ flexShrink: 0 }}><Plus size={16} />Add</Btn>
           </div>
+          {entryMsg && (
+            <div style={{ fontSize: 13, color: C.magenta, marginTop: 8, lineHeight: 1.45 }}>{entryMsg}</div>
+          )}
           <div style={{ fontSize: 12.5, color: C.muted, marginTop: 8, lineHeight: 1.45, maxWidth: "56ch" }}>
             They arrive outside the groups. Tap them below to place them — everyone
             already in that group picks up a new fixture against them.
@@ -3097,7 +3198,90 @@ function PlayersView({ t, nameOf, allMatches, onPlayer }) {
   );
 }
 
-function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
+/**
+ * Linking a player, or each member of a team, to a profile by the email they
+ * signed up with. Only for whoever runs the tournament. The tournament keeps
+ * the name it already uses; the link only says whose profile this is.
+ */
+function LinkPanel({ t, playerId, update, eventId }) {
+  const p = t.players.find((x) => x.id === playerId);
+  const [emails, setEmails] = useState({});
+  const [names, setNames] = useState({});
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(null);
+
+  const slots = !p ? [] : p.members && p.members.length
+    ? p.members.map((m, i) => ({ key: `m${i}`, label: m, id: (p.memberIds || [])[i] || null, member: i }))
+    : [{ key: "p", label: p.name, id: p.profileId || null, member: null }];
+
+  const ids = slots.map((s) => s.id).filter(Boolean).join(",");
+  useEffect(() => { bladerNames(ids ? ids.split(",") : []).then(setNames); }, [ids]);
+
+  if (!p) return null;
+
+  const write = (slot, id) => update((d) => {
+    const q = d.players.find((x) => x.id === playerId);
+    if (!q) return d;
+    if (slot.member === null) {
+      if (id) q.profileId = id; else delete q.profileId;
+    } else {
+      const next = (q.memberIds || q.members.map(() => null)).slice();
+      while (next.length < q.members.length) next.push(null);
+      next[slot.member] = id;
+      if (next.some(Boolean)) q.memberIds = next; else delete q.memberIds;
+    }
+    return d;
+  });
+
+  const link = async (slot) => {
+    const email = (emails[slot.key] || "").trim();
+    if (!looksLikeEmail(email)) { setMsg("That does not look like an email address."); return; }
+    setBusy(slot.key); setMsg(null);
+    const { blader, error } = await findBlader(email, eventId);
+    setBusy(null);
+    if (error) { setMsg("Emails could not be looked up just now."); return; }
+    if (!blader) { setMsg(`No account uses ${email}.`); return; }
+    if (linkedIds(t.players).has(blader.id)) { setMsg(`${blader.blader_name} is already linked in this tournament.`); return; }
+    write(slot, blader.id);
+    setEmails((e) => ({ ...e, [slot.key]: "" }));
+  };
+
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <Link2 size={16} color={C.cyan} />
+        <div className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>Blader profile</div>
+      </div>
+      {slots.map((s) => (
+        <div key={s.key} style={{ marginBottom: 10 }}>
+          {slots.length > 1 && <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 5 }}>{s.label}</div>}
+          {s.id ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1, fontSize: 14.5 }}>
+                Linked to <strong>{names[s.id] || "a profile"}</strong>
+              </div>
+              <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => write(s, null)}>Unlink</Btn>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8 }}>
+              <input style={inputStyle} type="email" placeholder="The email they signed up with"
+                value={emails[s.key] || ""}
+                onChange={(e) => { setEmails((x) => ({ ...x, [s.key]: e.target.value })); setMsg(null); }}
+                onKeyDown={(e) => e.key === "Enter" && link(s)} />
+              <Btn tone="primary" disabled={busy === s.key} style={{ flexShrink: 0 }} onClick={() => link(s)}>Link</Btn>
+            </div>
+          )}
+        </div>
+      ))}
+      {msg && <div style={{ fontSize: 13, color: C.magenta, lineHeight: 1.45 }}>{msg}</div>}
+      <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.45 }}>
+        A linked {slots.length > 1 ? "member" : "blader"} gets this tournament on the Tournaments tab of their profile.
+      </div>
+    </div>
+  );
+}
+
+function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId }) {
   const st = playerStats(playerId, allMatches, t);
   const group = t.groups.find((g) => g.playerIds.includes(playerId));
   const gi = t.groups.findIndex((g) => g.playerIds.includes(playerId));
@@ -3138,6 +3322,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose }) {
       </div>
 
       <div style={{ padding: 16, maxWidth: 720, margin: "0 auto" }}>
+        {isAdmin && update && <LinkPanel t={t} playerId={playerId} update={update} eventId={eventId} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(94px,1fr))", gap: 8, marginBottom: 22 }}>
           <Stat label="Played" value={st.played} />
           <Stat label="Won" value={st.wins} color={C.green} />
@@ -4054,8 +4239,9 @@ function BladersSheet({ onOpen, onClose }) {
  * One blader's profile. The real name row appears only when the database
  * hands one back, which it does for the blader, organisers and staff.
  */
-function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward }) {
+function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, onOpenEvent }) {
   const [b, setB] = useState(undefined);
+  const [tab, setTab] = useState("medals");
   const [real, setReal] = useState(null);
   const [medals, setMedals] = useState(undefined);
   const [names, setNames] = useState({});        // teammates, by id
@@ -4124,16 +4310,27 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward }) 
             </div>
           )}
 
-          <div style={{ marginTop: 26 }}>
-            {medals === undefined ? (
-              <div style={{ color: C.muted, fontSize: 14 }}>Loading medals…</div>
-            ) : medals === null ? (
-              <div style={{ color: C.muted, fontSize: 14 }}>Medals could not be loaded.</div>
-            ) : (
-              <MedalBoard medals={medals} names={names} canRemove={canRemove} onRemove={setDropping} />
-            )}
-            {err && <div style={{ color: C.magenta, fontSize: 13.5, marginTop: 10 }}>{err}</div>}
+          <div style={{ marginTop: 24, marginBottom: 16 }}>
+            <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
+              { value: "medals", label: "Medals" },
+              { value: "tournaments", label: "Tournaments" },
+            ]} />
           </div>
+
+          {tab === "medals" ? (
+            <div>
+              {medals === undefined ? (
+                <div style={{ color: C.muted, fontSize: 14 }}>Loading medals…</div>
+              ) : medals === null ? (
+                <div style={{ color: C.muted, fontSize: 14 }}>Medals could not be loaded.</div>
+              ) : (
+                <MedalBoard medals={medals} names={names} canRemove={canRemove} onRemove={setDropping} />
+              )}
+              {err && <div style={{ color: C.magenta, fontSize: 13.5, marginTop: 10 }}>{err}</div>}
+            </div>
+          ) : (
+            <Participation id={id} onOpenEvent={onOpenEvent} />
+          )}
         </>
       )}
 
@@ -4154,6 +4351,138 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward }) 
         />
       )}
     </SheetFrame>
+  );
+}
+
+/**
+ * How one blader did in one tournament, worked out from the tournament's own
+ * data so it can never disagree with it: their record, their place in the
+ * group or league, and how far they went. Null if they were not in it.
+ *
+ * `settled` says whether that result can still change — a quarter-finalist
+ * is settled once beaten, a beaten semi-finalist not until third place is
+ * played, and anyone still in it not at all.
+ */
+function participation(t, bladerId) {
+  const p = (t.players || []).find((x) =>
+    x.profileId === bladerId || (x.memberIds || []).includes(bladerId));
+  if (!p) return null;
+  const pid = p.id;
+  const nameOf = (id) => ((t.players || []).find((x) => x.id === id) || {}).name || "";
+
+  let played = 0, wins = 0, losses = 0, pf = 0, pa = 0;
+  everyMatch(t).forEach((m) => {
+    if (!m.done || !m.p1 || !m.p2 || (m.p1 !== pid && m.p2 !== pid)) return;
+    const { s1, s2 } = scoreOf(m);
+    const mine = m.p1 === pid;
+    played++; pf += mine ? s1 : s2; pa += mine ? s2 : s1;
+    const w = winnerOf(m);
+    if (w === pid) wins++; else if (w) losses++;
+  });
+
+  const league = isLeague(t);
+  const g = (t.groups || []).find((x) => x.playerIds.includes(pid));
+  let group = null;
+  if (g) {
+    const ms = (t.groupMatches || []).filter((m) => m.groupId === g.id);
+    const rows = computeStandings(g.playerIds, ms, nameOf, league ? t.leaguePoints : null, t.tieBreaks);
+    const i = rows.findIndex((r) => r.id === pid);
+    group = {
+      name: g.name, pos: i + 1, of: rows.length, pts: rows[i] ? rows[i].pts : 0,
+      done: ms.length > 0 && ms.every((m) => m.done),
+    };
+  }
+  const out = { team: p.members ? p.name : null, played, wins, losses, pf, pa, group, league };
+
+  // No knockout: the table is the result.
+  if (league || !t.koSize) {
+    return { ...out, settled: !!(group && group.done), place: group ? `${ordinal(group.pos)} of ${group.of}` : "Not placed" };
+  }
+
+  const b = t.bracket;
+  if (!b) return { ...out, settled: false, place: "Group stage" };
+
+  const rounds = b.rounds;
+  const final = rounds[rounds.length - 1][0];
+  const champ = winnerOf(final);
+  const thirdWinner = b.third && b.third.done ? winnerOf(b.third) : null;
+  const inMatch = (m) => m && (m.p1 === pid || m.p2 === pid);
+
+  if (champ === pid) return { ...out, settled: true, place: "Champion" };
+  if (champ && inMatch(final)) return { ...out, settled: true, place: "Runner-up" };
+  if (thirdWinner === pid) return { ...out, settled: true, place: "3rd place" };
+  if (thirdWinner && inMatch(b.third)) return { ...out, settled: true, place: "4th place" };
+
+  let deepest = -1, there = null;
+  rounds.forEach((r, ri) => r.forEach((m) => { if (inMatch(m)) { deepest = ri; there = m; } }));
+
+  // Never reached the bracket: out in the groups.
+  if (deepest < 0) return { ...out, settled: !!(group && group.done), place: "Group stage" };
+
+  const teams = rounds[deepest].length * 2;
+  const w = winnerOf(there);
+  if (there.done && w && w !== pid) {
+    const place = teams === 4 ? "Semi-finalist" : teams === 8 ? "Quarter-finalist" : `Round of ${teams}`;
+    // Beaten in a semi, with third place still to play for.
+    return { ...out, settled: !(teams === 4 && b.third && !b.third.done), place };
+  }
+  return { ...out, settled: false, place: `In the ${roundName(teams).toLowerCase()}` };
+}
+
+const RESULT_COLOR = { Champion: C.gold, "Runner-up": "#C9CED6", "3rd place": "#C87941" };
+
+/** The Tournaments tab: every tournament held in the app this blader was linked into. */
+function Participation({ id, onOpenEvent }) {
+  const [rows, setRows] = useState(undefined);
+  useEffect(() => {
+    bladerEvents(id).then((evs) => setRows(evs === null ? null : evs
+      .map((e) => ({ e, r: participation(e.data || {}, id) }))
+      .filter((x) => x.r)));
+  }, [id]);
+
+  if (rows === undefined) return <div style={{ color: C.muted, fontSize: 14 }}>Loading tournaments…</div>;
+  if (rows === null) return <div style={{ color: C.muted, fontSize: 14 }}>Tournaments could not be loaded.</div>;
+  if (!rows.length) {
+    return (
+      <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>
+        No tournaments yet. A tournament appears here once its organiser links this blader to it.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
+        {rows.length} tournament{rows.length === 1 ? "" : "s"} held in the app
+      </div>
+      {rows.map(({ e, r }) => {
+        const col = RESULT_COLOR[r.place] || C.ink;
+        return (
+          <button key={e.id} onClick={() => onOpenEvent && onOpenEvent(e.id)} style={{
+            width: "100%", textAlign: "left", display: "block", cursor: onOpenEvent ? "pointer" : "default",
+            background: C.surface, border: `1px solid ${C.line}`, borderLeft: `3px solid ${RESULT_COLOR[r.place] || C.line}`,
+            borderRadius: 3, padding: "11px 12px", marginBottom: 7, color: C.ink,
+          }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <div className="bx-d" style={{ flex: 1, minWidth: 0, fontSize: 16.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {e.name}
+              </div>
+              <div className="bx-d" style={{ fontSize: 15, fontWeight: 800, color: col, flexShrink: 0 }}>{r.place}</div>
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+              {FORMAT_LABEL[e.format] || e.format} · {e.organiser} · {new Date(e.created_at).toLocaleDateString()}
+              {!r.settled && <span style={{ color: C.gold }}> · in progress</span>}
+            </div>
+            <div style={{ fontSize: 13, marginTop: 7, lineHeight: 1.5 }}>
+              {r.team && <span style={{ color: C.cyan }}>With {r.team} · </span>}
+              {r.group && !r.league && `${r.group.name}: ${ordinal(r.group.pos)} of ${r.group.of} · `}
+              {r.league && `${r.group ? r.group.pts : 0} league points · `}
+              {r.wins}W {r.losses}L · {r.pf} points scored, {r.pa} conceded
+            </div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -4846,7 +5175,8 @@ export default function App() {
           meId={session ? session.user.id : null}
           canAward={awarder} isStaff={!!(profile && profile.is_staff)}
           onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)}
-          onAward={setAwarding} />
+          onAward={setAwarding}
+          onOpenEvent={(eid) => { setViewBlader(null); setSheet(null); openEvent(eid); }} />
       )}
       {awarding && awarder && (
         <MedalSheet blader={awarding} directory={directory}

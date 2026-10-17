@@ -289,6 +289,28 @@ export async function bladerNames(ids) {
   return Object.fromEntries(data.map((r) => [r.id, r.blader_name]));
 }
 
+/* ------------------------------------------------------------------ linking */
+
+/**
+ * The profile behind an email, as { blader: { id, blader_name } }, or
+ * { blader: null } when there is none — or none this account may look up. The
+ * email itself never comes back. Answers approved hosts, and the owner and
+ * referees of the tournament named.
+ */
+export async function findBlader(email, eventId = null) {
+  const { data, error } = await supabase.rpc("find_blader", { p_email: email, p_event: eventId });
+  if (error) return { error };
+  const row = Array.isArray(data) ? data[0] : data;
+  return { blader: row || null };
+}
+
+/** Every tournament this blader was linked into, newest first, with its data. */
+export async function bladerEvents(id) {
+  const { data, error } = await supabase.rpc("blader_events", { p_id: id });
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
 /* ------------------------------------------------------------------- medals */
 
 /*
