@@ -7,6 +7,10 @@ import {
 } from "lucide-react";
 import { supabase, arrival } from "./lib/supabase.js";
 import {
+  COMBO_TYPES, SLOT_LABEL, deckSize, partOptions, emptyCombo, cleanDeck, comboLabel, deckConflicts,
+  bitHasRatchet,
+} from "./deck.js";
+import {
   loadEvent, eventStamp, saveEvent, subscribeEvent,
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
   sendPasswordReset, setPassword,
@@ -3588,6 +3592,147 @@ function MatchReview({ checks, onDone, onClose }) {
   );
 }
 
+/**
+ * The beyblades a player brought, as the hobby writes them. Anyone can see a
+ * deck once it is entered; only whoever runs the tournament can enter it.
+ */
+function DeckSection({ t, playerId, canEdit, update }) {
+  const [editing, setEditing] = useState(false);
+  const p = t.players.find((x) => x.id === playerId);
+  if (!p) return null;
+  const deck = p.deck || [];
+  if (!deck.length && !canEdit) return null;
+
+  const save = (next) => {
+    update((d) => {
+      const q = d.players.find((x) => x.id === playerId);
+      if (q) { if (next.length) q.deck = next; else delete q.deck; }
+      return d;
+    });
+    setEditing(false);
+  };
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
+        <Blade color={C.gold} h={16} />
+        <h3 className="bx-d" style={{ fontSize: 19, fontWeight: 700, margin: 0, flex: 1 }}>Deck</h3>
+        {canEdit && (
+          <Btn tone="ghost" style={{ padding: "5px 10px", fontSize: 13 }} onClick={() => setEditing(true)}>
+            <Pencil size={13} />{deck.length ? "Edit" : "Add deck"}
+          </Btn>
+        )}
+      </div>
+      {deck.length ? deck.map((c, i) => (
+        <div key={i} style={{
+          display: "flex", alignItems: "center", gap: 10, background: C.surface,
+          border: `1px solid ${C.line}`, borderRadius: 3, padding: "9px 12px", marginBottom: 6,
+        }}>
+          <span className="bx-d" style={{ fontSize: 13, color: C.muted, width: 16 }}>{i + 1}</span>
+          <span className="bx-d" style={{ flex: 1, fontSize: 16, fontWeight: 700 }}>{comboLabel(c)}</span>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{COMBO_TYPES[c.type].label}</span>
+        </div>
+      )) : (
+        <div style={{ color: C.muted, fontSize: 13.5 }}>No deck entered. It is optional.</div>
+      )}
+      {editing && (
+        <DeckEditor title={`${p.name}'s deck`} format={t.format} deck={deck}
+          onSave={save} onClose={() => setEditing(false)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Entering a deck. Each beyblade picks its line, which decides its parts, and
+ * each part box suggests from the catalogue but takes anything typed — letters
+ * too, so "LF" is Low Flat and "360" is 3-60. Nothing is saved while any part
+ * appears twice: that is the one rule a deck has.
+ */
+function DeckEditor({ title, format, deck, onSave, onClose }) {
+  const size = deckSize(format);
+  const [combos, setCombos] = useState(() => {
+    const d = (deck || []).map((c) => ({ ...c }));
+    while (d.length < size) d.push(emptyCombo());
+    return d;
+  });
+
+  const conflicts = deckConflicts(combos);
+  const clash = (i, slot) => conflicts.find((x) => x.slot === slot && x.combos.includes(i));
+  const change = (i, patch) => setCombos((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+
+  return createPortal(
+    <SheetFrame title={title} onClose={onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 16, maxWidth: "58ch" }}>
+        Up to {size} beyblades. No part can appear twice in one deck. Choose from the list, or type
+        any part — letters work too, like LF or 3-60.
+      </div>
+
+      {Object.keys(COMBO_TYPES).flatMap((type) => COMBO_TYPES[type].slots.map((slot) => (
+        <datalist key={`${type}-${slot}`} id={`parts-${type}-${slot}`}>
+          {partOptions(type, slot).map((o) => <option key={o.name} value={o.name} />)}
+        </datalist>
+      )))}
+
+      {combos.map((c, i) => (
+        <div key={i} style={{ ...card, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
+            <div className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>Beyblade {i + 1}</div>
+            <div className="bx-d" style={{ flex: 1, minWidth: 0, fontSize: 14, color: C.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {comboLabel(c)}
+            </div>
+            <button onClick={() => change(i, { ...Object.fromEntries(Object.keys(SLOT_LABEL).map((k) => [k, ""])) })}
+              style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12.5, padding: 0 }}>
+              Clear
+            </button>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <Segmented value={c.type} onChange={(type) => change(i, { type })} tone={C.cyan}
+              options={[
+                { value: "bx", label: "BX / UX" }, { value: "inf", label: "Infinity" },
+                { value: "cx", label: "CX" }, { value: "cxi", label: "CX Infinity" },
+              ]} />
+          </div>
+          {COMBO_TYPES[c.type].slots.map((slot) => {
+            if (slot === "ratchet" && bitHasRatchet(c.bit)) {
+              return (
+                <div key={slot} style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
+                  Ratchet: none needed — the bit below comes with its own.
+                </div>
+              );
+            }
+            const x = clash(i, slot);
+            const others = x ? x.combos.filter((j) => j !== i).map((j) => j + 1) : [];
+            return (
+              <div key={slot} style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
+                  {SLOT_LABEL[slot]}{slot === "ratchet" ? " (leave empty if the bit has its own)" : ""}
+                </div>
+                <input style={{ ...inputStyle, padding: "9px 11px", borderColor: x ? C.magenta : C.line }}
+                  list={`parts-${c.type}-${slot}`} value={c[slot] || ""}
+                  onChange={(e) => change(i, { [slot]: e.target.value })} />
+                {x && (
+                  <div style={{ fontSize: 12, color: C.magenta, marginTop: 3 }}>
+                    {x.part} is also in beyblade {others.join(" and ")}.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn tone="primary" disabled={conflicts.length > 0} onClick={() => onSave(cleanDeck(combos))}>
+          <Check size={15} />{conflicts.length ? "Fix the repeated parts first" : "Save deck"}
+        </Btn>
+        <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
+      </div>
+    </SheetFrame>,
+    document.body,
+  );
+}
+
 function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId }) {
   const st = playerStats(playerId, allMatches, t);
   const group = t.groups.find((g) => g.playerIds.includes(playerId));
@@ -3638,6 +3783,8 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
           <Stat label="Points for" value={st.pf} />
           <Stat label="Against" value={st.pa} />
         </div>
+
+        <DeckSection t={t} playerId={playerId} canEdit={!!(isAdmin && update)} update={update} />
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
           <Blade color={C.cyan} h={16} />
@@ -4825,7 +4972,7 @@ function participation(t, bladerId) {
       done: ms.length > 0 && ms.every((m) => m.done),
     };
   }
-  const out = { team: p.members ? p.name : null, played, wins, losses, pf, pa, group, league };
+  const out = { team: p.members ? p.name : null, played, wins, losses, pf, pa, group, league, deck: p.deck || null };
 
   // No knockout: the table is the result.
   if (league || !t.koSize) {
@@ -4912,6 +5059,11 @@ function Participation({ id, onOpenEvent }) {
               {r.league && `${r.group ? r.group.pts : 0} league points · `}
               {r.wins}W {r.losses}L · {r.pf} points scored, {r.pa} conceded
             </div>
+            {r.deck && r.deck.length > 0 && (
+              <div style={{ fontSize: 12, color: C.muted, marginTop: 4, lineHeight: 1.45 }}>
+                Deck: {r.deck.map(comboLabel).join(" · ")}
+              </div>
+            )}
           </button>
         );
       })}
