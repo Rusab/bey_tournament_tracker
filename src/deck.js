@@ -6,7 +6,7 @@
  * the parts its type has:
  *
  *   bx   Basic and Unique Line         blade, ratchet, bit
- *   inf  Basic and Unique Infinity     blade, bit
+ *   inf  Unique Line Infinity          blade, bit (Basic Line Infinity is a bx)
  *   cx   Custom Line                   main blade, assist blade, ratchet, bit
  *   cxi  Custom Line Infinity          main blade, over blade, assist blade, ratchet, bit
  *
@@ -21,7 +21,7 @@ import {
 
 export const COMBO_TYPES = {
   bx: { label: "BX / UX", slots: ["blade", "ratchet", "bit"] },
-  inf: { label: "BX / UX Infinity", slots: ["blade", "bit"] },
+  inf: { label: "UX Infinity", slots: ["blade", "bit"] },
   cx: { label: "CX", slots: ["main", "assist", "ratchet", "bit"] },
   cxi: { label: "CX Infinity", slots: ["main", "over", "assist", "ratchet", "bit"] },
 };

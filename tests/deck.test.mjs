@@ -18,7 +18,13 @@ const check = (label, got, want) => {
 
 /* ---- the shape of each line ---- */
 check("BX and UX are blade, ratchet, bit", COMBO_TYPES.bx.slots, ["blade", "ratchet", "bit"]);
-check("BX and UX Infinity have no ratchet", COMBO_TYPES.inf.slots, ["blade", "bit"]);
+check("UX Infinity has no ratchet", COMBO_TYPES.inf.slots, ["blade", "bit"]);
+check("BX Infinity keeps its ratchet: Dran Strike is a BX / UX blade",
+  [partOptions("bx", "blade").some((p) => p.name === "Dran Strike"),
+   partOptions("inf", "blade").some((p) => p.name === "Dran Strike")],
+  [true, false]);
+check("Dran Strike FF with a ratchet (BX-49)",
+  comboLabel({ type: "bx", blade: "Dran Strike", ratchet: "3-60", bit: "Free Flat" }), "Dran Strike 3-60FF");
 check("CX is main blade, assist blade, ratchet, bit", COMBO_TYPES.cx.slots, ["main", "assist", "ratchet", "bit"]);
 check("CX Infinity adds the over blade, five parts",
   COMBO_TYPES.cxi.slots, ["main", "over", "assist", "ratchet", "bit"]);
@@ -27,7 +33,7 @@ check("four for a tag team", deckSize("tag"), 4);
 
 /* ---- written as the hobby writes them, matched against real products ---- */
 check("Dran Sword 3-60F (BX-01)", comboLabel({ type: "bx", blade: "Dran Sword", ratchet: "3-60", bit: "Flat" }), "Dran Sword 3-60F");
-check("Glory Valkyrie R (Infinity)", comboLabel({ type: "inf", blade: "Glory Valkyrie", bit: "Rush" }), "Glory Valkyrie R");
+check("Glory Valkyrie R (UX Infinity)", comboLabel({ type: "inf", blade: "Glory Valkyrie", bit: "Rush" }), "Glory Valkyrie R");
 check("Brave S6-60V (CX-01, less its lock chip)",
   comboLabel({ type: "cx", main: "Brave", assist: "Slash", ratchet: "6-60", bit: "Vortex" }), "Brave S6-60V");
 check("Blitz BK1-50I (CX-13)",

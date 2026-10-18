@@ -20,11 +20,14 @@
  * "Dran Sword 3-60F" or "Bahamut Blitz BK1-50I".
  */
 
-/* Basic Line (BX) and Unique Line (UX) blades: blade, ratchet, bit. */
+/*
+ * Basic Line (BX) and Unique Line (UX) blades: blade, ratchet, bit. Dran
+ * Strike is Basic Line Infinity, which keeps its ratchet, so it is here.
+ */
 export const BLADES = [
   // Basic Line
   "Black Shell", "Cobalt Dragoon", "Cobalt Drake", "Crimson Garuda", "Dran Dagger",
-  "Dran Sword", "Dranzer Spiral", "Hells Chain", "Hells Scythe", "Knight Lance",
+  "Dran Strike", "Dran Sword", "Dranzer Spiral", "Hells Chain", "Hells Scythe", "Knight Lance",
   "Knight Shield", "Leon Claw", "Mammoth Tusk", "Phoenix Feather", "Phoenix Wing",
   "Rhino Horn", "Samurai Calibur", "Samurai Steel", "Shark Edge", "Shelter Drake",
   "Sphinx Cowl", "Tricera Press", "Tyranno Beat", "Tyranno Roar", "Unicorn Sting",
@@ -36,8 +39,8 @@ export const BLADES = [
   "Shark Scale", "Shinobi Shadow", "Silver Wolf", "Wizard Rod", "Wyvern Hover",
 ];
 
-/* Infinity blades (BX-49, UX-19, UX-20): blade and bit, no ratchet. */
-export const INFINITY_BLADES = ["Bullet Griffon", "Dran Strike", "Glory Valkyrie"];
+/* Unique Line Infinity blades (UX-19, UX-20): blade and bit, no ratchet. */
+export const INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
 
 /* Custom Line (CX) main blades: main blade, assist blade, ratchet, bit. */
 export const MAIN_BLADES = [

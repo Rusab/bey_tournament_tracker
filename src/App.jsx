@@ -3689,7 +3689,7 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
           <div style={{ marginBottom: 10 }}>
             <Segmented value={c.type} onChange={(type) => change(i, { type })} tone={C.cyan}
               options={[
-                { value: "bx", label: "BX / UX" }, { value: "inf", label: "Infinity" },
+                { value: "bx", label: "BX / UX" }, { value: "inf", label: "UX Infinity" },
                 { value: "cx", label: "CX" }, { value: "cxi", label: "CX Infinity" },
               ]} />
           </div>
