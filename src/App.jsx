@@ -3706,14 +3706,18 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
             return (
               <div key={slot} style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
-                  {SLOT_LABEL[slot]}{slot === "ratchet" ? " (leave empty if the bit has its own)" : ""}
+                  {SLOT_LABEL[slot]}
+                  {slot === "ratchet" ? " (leave empty if the bit has its own)" : ""}
+                  {slot === "lock" ? " (may repeat; only one metal lock chip per deck)" : ""}
                 </div>
                 <input style={{ ...inputStyle, padding: "9px 11px", borderColor: x ? C.magenta : C.line }}
                   list={`parts-${c.type}-${slot}`} value={c[slot] || ""}
                   onChange={(e) => change(i, { [slot]: e.target.value })} />
                 {x && (
                   <div style={{ fontSize: 12, color: C.magenta, marginTop: 3 }}>
-                    {x.part} is also in beyblade {others.join(" and ")}.
+                    {x.rule === "metal"
+                      ? `Only one metal lock chip per deck — beyblade ${others.join(" and ")} has one too.`
+                      : `${x.part} is also in beyblade ${others.join(" and ")}.`}
                   </div>
                 )}
               </div>
@@ -3724,7 +3728,7 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Btn tone="primary" disabled={conflicts.length > 0} onClick={() => onSave(cleanDeck(combos))}>
-          <Check size={15} />{conflicts.length ? "Fix the repeated parts first" : "Save deck"}
+          <Check size={15} />{conflicts.length ? "Fix the marked parts first" : "Save deck"}
         </Btn>
         <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
       </div>

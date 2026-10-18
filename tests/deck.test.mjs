@@ -6,6 +6,7 @@
  */
 import {
   comboLabel, canonicalPart, cleanDeck, deckConflicts, deckSize, partOptions, COMBO_TYPES, bitHasRatchet,
+  lockIsMetal,
 } from "../src/deck.js";
 import * as P from "../src/parts.js";
 
@@ -25,9 +26,10 @@ check("BX Infinity keeps its ratchet: Dran Strike is a BX / UX blade",
   [true, false]);
 check("Dran Strike FF with a ratchet (BX-49)",
   comboLabel({ type: "bx", blade: "Dran Strike", ratchet: "3-60", bit: "Free Flat" }), "Dran Strike 3-60FF");
-check("CX is main blade, assist blade, ratchet, bit", COMBO_TYPES.cx.slots, ["main", "assist", "ratchet", "bit"]);
-check("CX Infinity adds the over blade, five parts",
-  COMBO_TYPES.cxi.slots, ["main", "over", "assist", "ratchet", "bit"]);
+check("CX is lock chip, main blade, assist blade, ratchet, bit",
+  COMBO_TYPES.cx.slots, ["lock", "main", "assist", "ratchet", "bit"]);
+check("CX Infinity adds the over blade",
+  COMBO_TYPES.cxi.slots, ["lock", "main", "over", "assist", "ratchet", "bit"]);
 check("three combos for groups and leagues", [deckSize("knockout"), deckSize("league")], [3, 3]);
 check("four for a tag team", deckSize("tag"), 4);
 
@@ -138,5 +140,39 @@ check("so it cannot clash with a ratchet used elsewhere",
 check("and is not written into its name",
   comboLabel({ type: "cx", main: "Blast", assist: "Assault", ratchet: "3-60", bit: "Turbo" }), "Blast ATr");
 
-console.log(fails ?`\n${fails} FAILED` : "\nAll deck checks passed.");
+/* ---- lock chips ---- */
+check("Dran Brave S6-60V, the full product name (CX-01)",
+  comboLabel({ type: "cx", lock: "Dran", main: "Brave", assist: "Slash", ratchet: "6-60", bit: "Vortex" }), "Dran Brave S6-60V");
+check("Bahamut Blitz BK1-50I (CX-13)",
+  comboLabel({ type: "cxi", lock: "Bahamut", main: "Blitz", over: "Break", assist: "Knuckle", ratchet: "1-50", bit: "Ignition" }),
+  "Bahamut Blitz BK1-50I");
+check("Pegasus Blast ATr (CX-07)",
+  comboLabel({ type: "cx", lock: "pegasus", main: "Blast", assist: "A", bit: "Tr" }), "Pegasus Blast ATr");
+check("Emperor and Valkyrie are the metal lock chips",
+  [lockIsMetal("Emperor"), lockIsMetal("valkyrie"), lockIsMetal("Dran")], [true, true, false]);
+check("the same lock chip twice is allowed",
+  deckConflicts([
+    { type: "cx", lock: "Dran", main: "Brave", assist: "Slash", ratchet: "6-60", bit: "Vortex" },
+    { type: "cx", lock: "Dran", main: "Arc", assist: "Round", ratchet: "4-55", bit: "Low Orb" },
+  ]), []);
+check("one metal lock chip is allowed",
+  deckConflicts([
+    { type: "cx", lock: "Emperor", main: "Might", assist: "Heavy", bit: "Operate" },
+    { type: "cx", lock: "Dran", main: "Brave", assist: "Slash", ratchet: "6-60", bit: "Vortex" },
+  ]), []);
+check("two metal lock chips are not",
+  deckConflicts([
+    { type: "cx", lock: "Emperor", main: "Might", assist: "Heavy", bit: "Operate" },
+    { type: "cx", lock: "Valkyrie", main: "Volt", assist: "Slash", ratchet: "6-60", bit: "Vortex" },
+  ]).map((x) => [x.rule, x.part, x.combos]),
+  [["metal", "Emperor and Valkyrie", [0, 1]]]);
+check("nor the same metal lock chip twice",
+  deckConflicts([
+    { type: "cx", lock: "Emperor", main: "Might", assist: "Heavy", bit: "Operate" },
+    { type: "cxi", lock: "Emperor", main: "Blitz", over: "Break", assist: "Knuckle", ratchet: "1-50", bit: "Ignition" },
+  ]).map((x) => x.rule),
+  ["metal"]);
+check("Operate comes fused with its own ratchet", bitHasRatchet("Operate"), true);
+
+console.log(fails ? `\n${fails} FAILED` : "\nAll deck checks passed.");
 process.exit(fails ? 1 : 0);

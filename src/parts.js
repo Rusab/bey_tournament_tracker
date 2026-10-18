@@ -42,7 +42,21 @@ export const BLADES = [
 /* Unique Line Infinity blades (UX-19, UX-20): blade and bit, no ratchet. */
 export const INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
 
-/* Custom Line (CX) main blades: main blade, assist blade, ratchet, bit. */
+/*
+ * Custom Line lock chips, Infinity included
+ * (https://beyblade.wiki/beyblade-x-lock-chips/). A lock chip may repeat in a
+ * deck, but only one of the metal ones - Emperor, or Valkyrie from Valkyrie
+ * Volt - may be in a deck at all.
+ */
+export const LOCK_CHIPS = [
+  { name: "Bahamut" }, { name: "Brachio" }, { name: "Cerberus" }, { name: "Dran" },
+  { name: "Emperor", metal: true }, { name: "Fox" }, { name: "Hells" }, { name: "Knight" },
+  { name: "Pegasus" }, { name: "Perseus" }, { name: "Ragna" }, { name: "Rhino" },
+  { name: "Sol" }, { name: "Unicorn" }, { name: "Valkyrie", metal: true }, { name: "Wizard" },
+  { name: "Wolf" },
+];
+
+/* Custom Line (CX) main blades: lock chip, main blade, assist blade, ratchet, bit. */
 export const MAIN_BLADES = [
   "Arc", "Blast", "Brave", "Brush", "Dark", "Eclipse", "Flame", "Hunt", "Might", "Reaper", "Volt",
 ];
@@ -50,7 +64,7 @@ export const MAIN_BLADES = [
 /*
  * Custom Line Infinity main blades - the metal half of an Expand Blade, worn
  * with an over blade. Not on any of the lists; taken from the product names
- * CX-13 to CX-18.
+ * CX-13 to CX-18 and confirmed by hand (CX-13 is Blitz, not "Bliz").
  */
 export const METAL_BLADES = ["Blitz", "Delta", "Fortress", "Rage", "Whip"];
 
@@ -60,7 +74,7 @@ export const OVER_BLADES = [
   { name: "Outer", abbr: "O" }, { name: "Peak", abbr: "P" },
 ];
 
-/* Custom Line assist blades, Infinity included. */
+/* Custom Line assist blades, Infinity included. Brachio Whip's W is Wheel. */
 export const ASSIST_BLADES = [
   { name: "Assault", abbr: "A" }, { name: "Bumper", abbr: "B" }, { name: "Charge", abbr: "C" },
   { name: "Dual", abbr: "D" }, { name: "Erase", abbr: "E" }, { name: "Free", abbr: "F" },
@@ -79,8 +93,8 @@ export const RATCHETS = [
 
 /*
  * Bits fit every line. A bit marked `fused` comes joined to its own ratchet,
- * so a combo using it has no separate ratchet. Turbo is confirmed by its
- * product (CX-07, Pegasus Blast ATr). Mark any other fused bit the same way.
+ * so a combo using it has no separate ratchet: Turbo (CX-07, Pegasus Blast
+ * ATr) and Operate. Mark any other fused bit the same way.
  */
 export const BITS = [
   { name: "Accel", abbr: "A" }, { name: "Ball", abbr: "B" }, { name: "Bound Spike", abbr: "BS" },
@@ -93,7 +107,7 @@ export const BITS = [
   { name: "Kick", abbr: "K" }, { name: "Level", abbr: "L" }, { name: "Low Flat", abbr: "LF" },
   { name: "Low Orb", abbr: "LO" }, { name: "Low Rush", abbr: "LR" }, { name: "Merge", abbr: "M" },
   { name: "Metal Needle", abbr: "MN" }, { name: "Narrow", abbr: "Nr" }, { name: "Needle", abbr: "N" },
-  { name: "Operate", abbr: "Op" }, { name: "Orb", abbr: "O" }, { name: "Point", abbr: "P" },
+  { name: "Operate", abbr: "Op", fused: true }, { name: "Orb", abbr: "O" }, { name: "Point", abbr: "P" },
   { name: "Quake", abbr: "Q" }, { name: "Rush", abbr: "R" }, { name: "Spike", abbr: "S" },
   { name: "Taper", abbr: "T" }, { name: "Trans Kick", abbr: "TK" }, { name: "Trans Point", abbr: "TP" },
   { name: "Turbo", abbr: "Tr", fused: true }, { name: "Under Flat", abbr: "UF" }, { name: "Under Needle", abbr: "UN" },

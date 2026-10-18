@@ -7,27 +7,27 @@
  *
  *   bx   Basic and Unique Line         blade, ratchet, bit
  *   inf  Unique Line Infinity          blade, bit (Basic Line Infinity is a bx)
- *   cx   Custom Line                   main blade, assist blade, ratchet, bit
- *   cxi  Custom Line Infinity          main blade, over blade, assist blade, ratchet, bit
+ *   cx   Custom Line                   lock chip, main blade, assist blade, ratchet, bit
+ *   cxi  Custom Line Infinity          lock chip, main blade, over blade, assist blade, ratchet, bit
  *
  * Every part is optional - a deck is a record kept for interest, not a gate
  * on playing - and the ratchet especially, since a bit like Turbo carries its
  * own. Parts are stored by name, as typed or as chosen from the catalogue.
  */
 import {
-  BLADES, INFINITY_BLADES, MAIN_BLADES, METAL_BLADES,
+  BLADES, INFINITY_BLADES, LOCK_CHIPS, MAIN_BLADES, METAL_BLADES,
   OVER_BLADES, ASSIST_BLADES, RATCHETS, BITS,
 } from "./parts.js";
 
 export const COMBO_TYPES = {
   bx: { label: "BX / UX", slots: ["blade", "ratchet", "bit"] },
   inf: { label: "UX Infinity", slots: ["blade", "bit"] },
-  cx: { label: "CX", slots: ["main", "assist", "ratchet", "bit"] },
-  cxi: { label: "CX Infinity", slots: ["main", "over", "assist", "ratchet", "bit"] },
+  cx: { label: "CX", slots: ["lock", "main", "assist", "ratchet", "bit"] },
+  cxi: { label: "CX Infinity", slots: ["lock", "main", "over", "assist", "ratchet", "bit"] },
 };
 
 export const SLOT_LABEL = {
-  blade: "Blade", main: "Main Blade", over: "Over Blade",
+  lock: "Lock Chip", blade: "Blade", main: "Main Blade", over: "Over Blade",
   assist: "Assist Blade", ratchet: "Ratchet", bit: "Bit",
 };
 
@@ -38,6 +38,7 @@ const named = (list) => list.map((x) => (typeof x === "string" ? { name: x } : x
 
 /** The catalogue entries offered for one part of one kind of combo. */
 export function partOptions(type, slot) {
+  if (slot === "lock") return LOCK_CHIPS;
   if (slot === "blade") return named(type === "inf" ? INFINITY_BLADES : BLADES);
   if (slot === "main") return named(type === "cxi" ? METAL_BLADES : MAIN_BLADES);
   if (slot === "over") return OVER_BLADES;
@@ -73,6 +74,12 @@ export function canonicalPart(slot, value) {
 const abbrOf = (slot, name) => {
   const hit = allOf(slot).find((p) => p.name === name);
   return hit && hit.abbr ? hit.abbr : name;
+};
+
+/** Whether this lock chip is one of the metal ones, of which a deck may hold one. */
+export const lockIsMetal = (lock) => {
+  const name = canonicalPart("lock", lock);
+  return !!LOCK_CHIPS.find((l) => l.name === name && l.metal);
 };
 
 /** Whether this bit comes fused with its own ratchet. */
@@ -119,27 +126,38 @@ export function comboLabel(c) {
   if (p.type === "bx") return tidy(`${p.blade || ""} ${p.ratchet || ""}${piece("bit")}`);
   if (p.type === "inf") return tidy(`${p.blade || ""} ${piece("bit")}`);
   const code = `${p.type === "cxi" ? piece("over") : ""}${piece("assist")}${p.ratchet || ""}${piece("bit")}`;
-  return tidy(`${p.main || ""} ${code}`);
+  return tidy(`${p.lock || ""} ${p.main || ""} ${code}`);
 }
 
 /**
- * Every part that appears more than once in a deck: [{ slot, part, combos }],
- * combos being the indexes it appears in. An empty list is a legal deck.
+ * Everything that makes a deck illegal: [{ slot, part, combos, rule }], combos
+ * being the indexes involved. An empty list is a legal deck.
  *
- * A part is the same part on any line - a 3-60 is a 3-60 whether it sits
- * under a Basic Line blade or a Custom Line one - so parts are compared by
- * kind, not by combo type.
+ * Two rules. No part may appear twice (rule "repeat") - and a part is the
+ * same part on any line, so a 3-60 under a Basic Line blade clashes with a
+ * 3-60 under a Custom Line one. Lock chips are the exception: they may repeat,
+ * except that a deck holds at most one metal lock chip (rule "metal").
  */
 export function deckConflicts(deck) {
   const seen = new Map();
   (deck || []).forEach((c, i) => {
     const p = cleanCombo(c);
     COMBO_TYPES[p.type].slots.forEach((slot) => {
-      if (!p[slot]) return;
+      if (!p[slot] || slot === "lock") return;
       const key = `${slot}|${norm(p[slot])}`;
-      if (!seen.has(key)) seen.set(key, { slot, part: p[slot], combos: [] });
+      if (!seen.has(key)) seen.set(key, { slot, part: p[slot], combos: [], rule: "repeat" });
       seen.get(key).combos.push(i);
     });
   });
-  return [...seen.values()].filter((x) => x.combos.length > 1);
+  const out = [...seen.values()].filter((x) => x.combos.length > 1);
+
+  const metal = (deck || []).map((c, i) => [cleanCombo(c), i])
+    .filter(([p]) => p.lock && lockIsMetal(p.lock));
+  if (metal.length > 1) {
+    out.push({
+      slot: "lock", rule: "metal", combos: metal.map(([, i]) => i),
+      part: [...new Set(metal.map(([p]) => p.lock))].join(" and "),
+    });
+  }
+  return out;
 }
