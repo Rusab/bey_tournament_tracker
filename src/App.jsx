@@ -24,6 +24,7 @@ import {
   removeFromSeries, deleteSeries, seriesRequests,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
+import { renderRankingImage } from "./rankingImage.js";
 
 /* ================================================================== */
 /*  Domain                                                             */
@@ -3976,6 +3977,7 @@ const rankingMoved = (saved, fresh) =>
 function FinalStandingsSheet({ t, onClose, update }) {
   const [cfg, setCfg] = useState(loadScoring);
   const [ask, setAsk] = useState(null);   // "confirm" | "unlock"
+  const [imaging, setImaging] = useState(false);
   const swipeBack = useSwipeBack(onClose);
 
   useEffect(() => {
@@ -4146,6 +4148,34 @@ function FinalStandingsSheet({ t, onClose, update }) {
           style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 17 }}>
           <Download size={18} />Download the CSV
         </Btn>
+        <Btn disabled={rows.length === 0} onClick={() => setImaging(true)}
+          style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5, marginTop: 10 }}>
+          <ImageIcon size={17} />Ranking image for social media
+        </Btn>
+        {imaging && (
+          <RankingImageSheet fileName={`${slug(t.name)}-ranking.png`} onClose={() => setImaging(false)}
+            spec={{
+              title: t.name,
+              heading: saved ? "Final standings" : "Standings · not yet confirmed",
+              meta: [
+                saved ? `Confirmed ${new Date(saved.confirmedAt).toLocaleDateString()}` : null,
+                `${rows.length} ${manyWord(t).toLowerCase()}`,
+              ].filter(Boolean).join("  ·  "),
+              bgUrl: t.bgUrl, logoUrl: t.logoUrl,
+              columns: [
+                { label: "Total", width: 140 }, { label: "P", width: 80 },
+                { label: "W", width: 80 }, { label: "Margin", width: 130 },
+              ],
+              rows: rows.map((r) => ({
+                rank: r.rank, name: r.name,
+                cells: [Math.round(r.total * 100) / 100, r.played, r.wins, r.margin],
+              })),
+              note: kings && kings.length
+                ? `${kings.length > 1 ? "Swiss Kings" : "Swiss King"}: ${kings.map((k) => k.name).join(", ")}`
+                : null,
+              site: location.host,
+            }} />
+        )}
         {saved && update && (
           <Btn tone="ghost" onClick={() => setAsk("unlock")}
             style={{ width: "100%", justifyContent: "center", padding: 12, fontSize: 14.5, marginTop: 10 }}>
@@ -4767,6 +4797,71 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
   );
 }
 
+/**
+ * A ranking as a picture to post. Made when the sheet opens, then shown, so
+ * the Share tap that follows is a fresh one — phones only allow sharing
+ * straight from a tap, not after waiting on the picture to be drawn. Share
+ * sends it to Instagram, WhatsApp or Photos; Download saves the file; and on
+ * any phone, pressing and holding the picture saves it too.
+ */
+function RankingImageSheet({ spec, fileName, onClose }) {
+  const [blob, setBlob] = useState(null);
+  const [url, setUrl] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let gone = false, made = null;
+    renderRankingImage(spec).then((b) => {
+      if (gone) return;
+      made = URL.createObjectURL(b);
+      setBlob(b); setUrl(made);
+    }).catch((e) => { if (!gone) setErr(e.message || "The image could not be made."); });
+    return () => { gone = true; if (made) URL.revokeObjectURL(made); };
+  }, []);
+
+  const file = blob ? new File([blob], fileName, { type: "image/png" }) : null;
+  const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
+
+  const share = async () => {
+    try { await navigator.share({ files: [file], title: spec.title }); }
+    catch (e) { if (e && e.name !== "AbortError") setErr("Sharing did not work here. Use Download instead."); }
+  };
+  const download = () => {
+    const a = document.createElement("a");
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  return createPortal(
+    <SheetFrame title="Ranking image" onClose={onClose}>
+      {!url && !err && <div style={{ color: C.muted, fontSize: 14 }}>Drawing the image…</div>}
+      {err && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12 }}>{err}</div>}
+      {url && (
+        <>
+          <img src={url} alt={`${spec.title} ranking`} style={{
+            width: "100%", display: "block", borderRadius: 4, border: `1px solid ${C.line}`, marginBottom: 14,
+          }} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {canShare && (
+              <Btn tone="primary" onClick={share} style={{ flex: 1, justifyContent: "center", padding: 13 }}>
+                <Download size={16} />Share
+              </Btn>
+            )}
+            <Btn tone={canShare ? "default" : "primary"} onClick={download}
+              style={{ flex: 1, justifyContent: "center", padding: 13 }}>
+              <Download size={16} />Download PNG
+            </Btn>
+          </div>
+          <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>
+            On a phone you can also press and hold the image to save it to your photos.
+          </div>
+        </>
+      )}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
 /* ================================================================== */
 /*  Series                                                             */
 /* ================================================================== */
@@ -5029,6 +5124,7 @@ function LinkTournamentSheet({ eventId, eventName, onClose, onDone }) {
  */
 function SeriesSheet({ seriesId, meId, onClose }) {
   const [sr, setSr] = useState(undefined);
+  const [imaging, setImaging] = useState(false);
   const [evs, setEvs] = useState(undefined);
   const [names, setNames] = useState({});
   const [ask, setAsk] = useState(null);   // { kind: "remove", event } | { kind: "delete" }
@@ -5113,6 +5209,35 @@ function SeriesSheet({ seriesId, meId, onClose }) {
               </div>
             </div>
           )}
+          {ranking.rows.length > 0 && (
+            <Btn onClick={() => setImaging(true)} style={{ width: "100%", justifyContent: "center", padding: 13, marginBottom: 10 }}>
+              <ImageIcon size={17} />Ranking image for social media
+            </Btn>
+          )}
+          {imaging && (() => {
+            // The newest counted tournament lends the series its look.
+            const face = ranking.counted.slice().reverse()
+              .find((e) => e.data && (e.data.bgUrl || e.data.logoUrl));
+            return (
+              <RankingImageSheet fileName={`${slug(sr.name)}-grand-total.png`} onClose={() => setImaging(false)}
+                spec={{
+                  title: sr.name,
+                  heading: "Grand total",
+                  meta: `${ranking.counted.length} tournament${ranking.counted.length === 1 ? "" : "s"}  ·  Run by ${names[sr.owner_id] || "the organiser"}`,
+                  bgUrl: face ? face.data.bgUrl : null, logoUrl: face ? face.data.logoUrl : null,
+                  columns: [
+                    { label: "Total", width: 140 }, { label: "T", width: 80 },
+                    { label: "W", width: 80 }, { label: "Best", width: 120 },
+                  ],
+                  rows: ranking.rows.map((r) => ({
+                    rank: r.rank, name: r.name,
+                    cells: [r.total, r.tournaments, r.wins, Number.isFinite(r.best) ? ordinal(r.best) : "—"],
+                  })),
+                  note: null,
+                  site: location.host,
+                }} />
+            );
+          })()}
           <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 22, maxWidth: "60ch" }}>
             Each tournament's confirmed totals, added together. T is tournaments played; Best is the
             highest finish.
