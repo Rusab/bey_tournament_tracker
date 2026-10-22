@@ -744,10 +744,11 @@ function finalStandings(t, cfg) {
     .sort((x, y) =>
       y.total - x.total || y.wins - x.wins || y.margin - x.margin || x.name.localeCompare(y.name));
 
-  // Equal totals share a rank, and the next one skips accordingly.
+  // Equal totals share a rank, and the next total takes the next number:
+  // 1, 2, 2, 3 - not 1, 2, 2, 4.
   let rank = 0, prev = null;
-  rows.forEach((r, i) => {
-    if (prev === null || r.total !== prev) rank = i + 1;
+  rows.forEach((r) => {
+    if (prev === null || r.total !== prev) rank += 1;
     r.rank = rank;
     prev = r.total;
   });
