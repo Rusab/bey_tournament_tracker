@@ -20,7 +20,10 @@ import {
   avatarUrl, uploadAvatar, removeAvatar,
   bladerNames, listMedals, amAwarder, addMedal, removeMedal,
   findBlader, bladerEvents, bladerDirectory,
+  seriesOfEvents, loadSeries, seriesEvents, everyEvent, startSeries, linkToSeries,
+  removeFromSeries, deleteSeries, seriesRequests,
 } from "./lib/db.js";
+import { seriesRanking } from "./series.js";
 
 /* ================================================================== */
 /*  Domain                                                             */
@@ -1401,6 +1404,9 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [group, setGroup] = useState(initialGroup);
   const isAdmin = canEdit;
   const store = useMemo(() => storeFor(eventId), [eventId]);
+  // Who is looking, for the series card: which side of a request is theirs.
+  const [meId, setMeId] = useState(null);
+  useEffect(() => { currentSession().then((x) => setMeId(x ? x.user.id : null)); }, []);
 
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch (e) { /* private mode */ }
@@ -1680,7 +1686,8 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
             group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
           {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin}
-            group={group} setGroup={setGroup} onPlayer={setDetail} onFinal={() => setShowFinal(true)} />}
+            group={group} setGroup={setGroup} onPlayer={setDetail} onFinal={() => setShowFinal(true)}
+            eventId={eventId} isOwner={isOwner} meId={meId} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
             onScore={(id) => setScoring({ kind: "ko", id })}
             onEditRound={isAdmin ? setEditRound : null} />}
@@ -2637,7 +2644,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pend
 /*  Standings                                                          */
 /* ================================================================== */
 
-function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFinal }) {
+function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFinal, eventId, isOwner, meId }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
   const everything = everyMatch(t);
   const playedCount = everything.filter((m) => m.done).length;
@@ -2857,6 +2864,8 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
           <Btn onClick={onFinal} tone="primary"><Medal size={15} />Generate final standings</Btn>
         </div>
       )}
+
+      <SeriesCard eventId={eventId} eventName={t.name} isOwner={isOwner} meId={meId} />
 
       {/* Not gated on the tournament being finished, and not on being an
           admin: taking the results away mid-run is the whole point, and a
@@ -4758,6 +4767,460 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
   );
 }
 
+/* ================================================================== */
+/*  Series                                                             */
+/* ================================================================== */
+
+/**
+ * The series a tournament is in, shown to anyone. Its host also gets the way
+ * to link it to an earlier tournament, and sees what is still waiting on
+ * somebody's agreement, with the buttons for whatever is theirs to decide.
+ */
+function SeriesCard({ eventId, eventName, isOwner, meId }) {
+  const [rows, setRows] = useState(undefined);
+  const [owners, setOwners] = useState({});
+  const [linking, setLinking] = useState(false);
+  const [open, setOpen] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const load = () => seriesOfEvents([eventId]).then(async (r) => {
+    setRows(r);
+    if (r) setOwners(await bladerNames(r.map((x) => x.series && x.series.owner_id)));
+  });
+  useEffect(() => { if (eventId) load(); }, [eventId]);
+
+  if (!rows) return null;
+  const live = rows.filter((r) => r.series && r.owner_ok && r.host_ok);
+  const waiting = rows.filter((r) => r.series && !(r.owner_ok && r.host_ok));
+  if (!live.length && !isOwner) return null;
+
+  const act = async (fn) => {
+    setMsg(null);
+    const { error } = await fn();
+    if (error) setMsg(error.message || "That did not go through.");
+    load();
+  };
+
+  return (
+    <div style={{ ...card, marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <Trophy size={17} color={C.gold} />
+        <div className="bx-d" style={{ fontSize: 19, fontWeight: 700 }}>Series</div>
+      </div>
+
+      {live.length === 0 && (
+        <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 12, maxWidth: "58ch" }}>
+          Link this tournament to an earlier one to rank them together — a saga, or a lifetime
+          ranking across a whole series. Each tournament counts once its final ranking is confirmed.
+        </div>
+      )}
+
+      {live.map((r) => (
+        <div key={r.series_id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{r.series.name}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>Run by {owners[r.series.owner_id] || "an organiser"}</div>
+          </div>
+          <Btn tone="primary" style={{ padding: "7px 11px", fontSize: 13.5 }} onClick={() => setOpen(r.series_id)}>
+            Grand total
+          </Btn>
+        </div>
+      ))}
+
+      {isOwner && waiting.map((r) => {
+        const mineToGive = (!r.host_ok) || (!r.owner_ok && r.series.owner_id === meId);
+        return (
+          <div key={r.series_id} style={{
+            background: C.base, border: `1px solid ${C.gold}55`, borderRadius: 3, padding: "9px 11px", marginBottom: 8,
+          }}>
+            <div style={{ fontSize: 14 }}><strong>{r.series.name}</strong></div>
+            <div style={{ fontSize: 12.5, color: C.muted, margin: "2px 0 8px" }}>
+              {mineToGive
+                ? `${owners[r.series.owner_id] || "Its organiser"} wants to add this tournament.`
+                : `Waiting for ${owners[r.series.owner_id] || "the series' organiser"} to approve.`}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {mineToGive && (
+                <Btn tone="primary" style={{ padding: "6px 10px", fontSize: 13 }}
+                  onClick={() => act(() => linkToSeries(r.series_id, eventId))}>
+                  <Check size={14} />Approve
+                </Btn>
+              )}
+              <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }}
+                onClick={() => act(() => removeFromSeries(r.series_id, eventId))}>
+                {mineToGive ? "Decline" : "Withdraw"}
+              </Btn>
+            </div>
+          </div>
+        );
+      })}
+
+      {isOwner && (
+        <Btn tone="ghost" onClick={() => setLinking(true)} style={{ marginTop: 4 }}>
+          <Link2 size={15} />Link to a previous tournament
+        </Btn>
+      )}
+      {msg && <div style={{ color: C.magenta, fontSize: 13, marginTop: 8 }}>{msg}</div>}
+
+      {linking && (
+        <LinkTournamentSheet eventId={eventId} eventName={eventName}
+          onClose={() => setLinking(false)} onDone={load} />
+      )}
+      {open && <SeriesSheet seriesId={open} meId={meId} onClose={() => { setOpen(null); load(); }} />}
+    </div>
+  );
+}
+
+/**
+ * Choosing the earlier tournament. Joining a series it is already in, or
+ * starting a new series with the two of them. If either belongs to another
+ * organiser, it waits for their agreement and says so.
+ */
+function LinkTournamentSheet({ eventId, eventName, onClose, onDone }) {
+  const [events, setEvents] = useState(undefined);
+  const [hosts, setHosts] = useState({});
+  const [inSeries, setInSeries] = useState({});
+  const [q, setQ] = useState("");
+  const [target, setTarget] = useState(null);
+  const [newName, setNewName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const evs = await everyEvent();
+      if (!evs) { setEvents(null); return; }
+      const others = evs.filter((e) => e.id !== eventId);
+      setEvents(others);
+      setHosts(await bladerNames(others.map((e) => e.owner_id)));
+      const mem = (await seriesOfEvents(others.map((e) => e.id))) || [];
+      const by = {};
+      mem.filter((m) => m.series && m.owner_ok && m.host_ok).forEach((m) => {
+        if (!by[m.event_id]) by[m.event_id] = [];
+        by[m.event_id].push(m.series);
+      });
+      setInSeries(by);
+    })();
+  }, [eventId]);
+
+  const pick = (e) => { setTarget(e); setNewName(`${e.name} Series`); setMsg(null); };
+
+  const finish = (text) => { setBusy(false); setMsg({ ok: true, text }); onDone(); };
+  const fail = (error) => { setBusy(false); setMsg({ ok: false, text: error.message || "That did not go through." }); };
+
+  const join = async (sr) => {
+    setBusy(true); setMsg(null);
+    const r = await linkToSeries(sr.id, eventId);
+    if (r.error) return fail(r.error);
+    finish(r.status === "approved"
+      ? `Linked. ${eventName} is now in ${sr.name}.`
+      : `Asked. ${eventName} joins ${sr.name} once its organiser approves.`);
+  };
+
+  const start = async () => {
+    const name = newName.trim();
+    if (!name) { setMsg({ ok: false, text: "Give the series a name." }); return; }
+    if (name.length > 80) { setMsg({ ok: false, text: "Keep the name to 80 characters." }); return; }
+    setBusy(true); setMsg(null);
+    const made = await startSeries(name);
+    if (made.error) return fail(made.error);
+    const theirs = await linkToSeries(made.series.id, target.id);
+    if (theirs.error) return fail(theirs.error);
+    const ours = await linkToSeries(made.series.id, eventId);
+    if (ours.error) return fail(ours.error);
+    finish(theirs.status === "approved"
+      ? `Started ${name} with both tournaments.`
+      : `Started ${name}. ${hosts[target.owner_id] || "Its organiser"} needs to approve adding ${target.name}; a request is waiting for them.`);
+  };
+
+  const needle = q.trim().toLowerCase();
+  const shown = (events || []).filter((e) => !needle
+    || e.name.toLowerCase().includes(needle)
+    || (hosts[e.owner_id] || "").toLowerCase().includes(needle));
+
+  return createPortal(
+    <SheetFrame title="Link to a tournament" onClose={onClose}>
+      {target ? (
+        <>
+          <button onClick={() => { setTarget(null); setMsg(null); }} style={{
+            background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13.5,
+            display: "flex", alignItems: "center", gap: 6, padding: "0 0 12px",
+          }}><ArrowLeft size={15} />Choose another</button>
+
+          <div style={{ ...card, marginBottom: 14 }}>
+            <div className="bx-d" style={{ fontSize: 18, fontWeight: 700 }}>{target.name}</div>
+            <div style={{ fontSize: 12.5, color: C.muted }}>
+              {hosts[target.owner_id] || "Organiser"} · {new Date(target.created_at).toLocaleDateString()}
+            </div>
+          </div>
+
+          {msg && (
+            <div style={{ color: msg.ok ? C.green : C.magenta, fontSize: 13.5, lineHeight: 1.5, marginBottom: 14 }}>
+              {msg.text}
+            </div>
+          )}
+
+          {!(msg && msg.ok) && (
+            <>
+              {(inSeries[target.id] || []).length > 0 && (
+                <div style={{ marginBottom: 18 }}>
+                  <div className="bx-d" style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Join a series it is in</div>
+                  {inSeries[target.id].map((sr) => (
+                    <Btn key={sr.id} disabled={busy} onClick={() => join(sr)}
+                      style={{ width: "100%", justifyContent: "flex-start", marginBottom: 6 }}>
+                      <Link2 size={15} />{sr.name}
+                    </Btn>
+                  ))}
+                </div>
+              )}
+              <div className="bx-d" style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>
+                {(inSeries[target.id] || []).length ? "Or start a new series with both" : "Start a series with both"}
+              </div>
+              <input style={{ ...inputStyle, marginBottom: 8 }} maxLength={80} value={newName}
+                onChange={(e) => setNewName(e.target.value)} placeholder="Series name" />
+              <Btn tone="primary" disabled={busy} onClick={start}>
+                <Check size={15} />{busy ? "Linking…" : "Start series"}
+              </Btn>
+            </>
+          )}
+          {msg && msg.ok && <Btn tone="primary" onClick={onClose}>Done</Btn>}
+        </>
+      ) : (
+        <>
+          <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 14, maxWidth: "58ch" }}>
+            Choose the earlier tournament. If it belongs to another organiser, they are asked to
+            approve before the two are ranked together.
+          </div>
+          <div style={{ position: "relative", marginBottom: 14 }}>
+            <Search size={15} color={C.muted} style={{ position: "absolute", left: 12, top: 13 }} />
+            <input style={{ ...inputStyle, paddingLeft: 34 }} value={q}
+              placeholder="Search tournaments or organisers" onChange={(e) => setQ(e.target.value)} />
+          </div>
+          {events === undefined ? (
+            <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+          ) : events === null ? (
+            <div style={{ color: C.muted, fontSize: 14 }}>Tournaments could not be loaded.</div>
+          ) : shown.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 14 }}>No tournament by that name.</div>
+          ) : shown.map((e) => (
+            <button key={e.id} onClick={() => pick(e)} style={{
+              width: "100%", textAlign: "left", display: "block", cursor: "pointer", color: C.ink,
+              background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3, padding: "10px 12px", marginBottom: 6,
+            }}>
+              <div className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{e.name}</div>
+              <div style={{ fontSize: 12, color: C.muted }}>
+                {hosts[e.owner_id] || "Organiser"} · {new Date(e.created_at).toLocaleDateString()}
+                {e.archived ? " · archived" : ""}
+                {(inSeries[e.id] || []).length ? ` · in ${inSeries[e.id].map((x) => x.name).join(", ")}` : ""}
+              </div>
+            </button>
+          ))}
+        </>
+      )}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
+/**
+ * A series' grand total: every tournament's confirmed ranking added up,
+ * blader by blader. Tournaments without a confirmed ranking are listed as
+ * waiting rather than counted on whatever their results say today.
+ */
+function SeriesSheet({ seriesId, meId, onClose }) {
+  const [sr, setSr] = useState(undefined);
+  const [evs, setEvs] = useState(undefined);
+  const [names, setNames] = useState({});
+  const [ask, setAsk] = useState(null);   // { kind: "remove", event } | { kind: "delete" }
+
+  const load = async () => {
+    const one = await loadSeries(seriesId);
+    setSr(one);
+    const list = await seriesEvents(seriesId);
+    setEvs(list);
+    if (list) setNames(await bladerNames([...(list.map((e) => e.owner_id)), one && one.owner_id]));
+  };
+  useEffect(() => { load(); }, [seriesId]);
+
+  const ranking = useMemo(() => (evs ? seriesRanking(evs.filter((e) => e.approved)) : null), [evs]);
+  const owner = sr && meId && sr.owner_id === meId;
+
+  const remove = async (e) => {
+    setAsk(null);
+    await removeFromSeries(seriesId, e.id);
+    load();
+  };
+  const destroy = async () => {
+    setAsk(null);
+    await deleteSeries(seriesId);
+    onClose();
+  };
+
+  const counted = ranking ? new Set(ranking.counted.map((e) => e.id)) : new Set();
+
+  return createPortal(
+    <SheetFrame title={sr ? sr.name : "Series"} onClose={onClose}>
+      {sr === undefined || evs === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : !sr || !evs ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>This series could not be loaded.</div>
+      ) : (
+        <>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 16, lineHeight: 1.5 }}>
+            Run by {names[sr.owner_id] || "an organiser"} · {ranking.counted.length} tournament
+            {ranking.counted.length === 1 ? "" : "s"} counted
+            {ranking.waiting.length ? ` · ${ranking.waiting.length} waiting for a confirmed ranking` : ""}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
+            <Blade color={C.gold} h={18} />
+            <h3 className="bx-d" style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>Grand total</h3>
+          </div>
+
+          {ranking.rows.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 18, lineHeight: 1.5 }}>
+              Nothing counted yet. A tournament counts once its final ranking is confirmed.
+            </div>
+          ) : (
+            <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: 10 }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                  <thead>
+                    <tr style={{ color: C.muted, fontSize: 12 }}>
+                      {["", "Blader", "Total", "T", "W", "Best"].map((h, i) => (
+                        <th key={i} style={{
+                          textAlign: i === 1 ? "left" : i === 0 ? "center" : "right",
+                          padding: "8px 10px", fontWeight: 600, borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap",
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ranking.rows.map((r) => (
+                      <tr key={r.key}>
+                        <td style={{ ...td, textAlign: "center", width: 28, fontWeight: 800, color: r.rank <= 3 ? C.gold : C.muted }}>{r.rank}</td>
+                        <td style={{ ...td, textAlign: "left", whiteSpace: "nowrap", fontWeight: r.rank <= 3 ? 600 : 400 }}>
+                          {r.name}{r.byName ? <span style={{ color: C.muted }}> *</span> : null}
+                        </td>
+                        <td style={{ ...td, color: C.cyan, fontWeight: 800 }}>{r.total}</td>
+                        <td style={td}>{r.tournaments}</td>
+                        <td style={td}>{r.wins}</td>
+                        <td style={{ ...td, color: C.muted }}>{Number.isFinite(r.best) ? ordinal(r.best) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 22, maxWidth: "60ch" }}>
+            Each tournament's confirmed totals, added together. T is tournaments played; Best is the
+            highest finish.
+            {ranking.rows.some((r) => r.byName) && " * has no linked profile, so is matched across tournaments by name."}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
+            <Blade color={C.cyan} h={16} />
+            <h3 className="bx-d" style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Tournaments</h3>
+          </div>
+          {evs.map((e) => {
+            const canRemove = meId && (meId === sr.owner_id || meId === e.owner_id);
+            const state = !e.approved
+              ? (e.owner_ok ? "waiting for its organiser to approve" : "waiting for the series' organiser to approve")
+              : counted.has(e.id) ? "counted" : "ranking not confirmed yet";
+            if (!e.approved && !canRemove) return null;
+            return (
+              <div key={e.id} style={{
+                display: "flex", alignItems: "center", gap: 10, background: C.surface,
+                border: `1px solid ${C.line}`, borderLeft: `3px solid ${state === "counted" ? C.green : C.gold}`,
+                borderRadius: 3, padding: "9px 12px", marginBottom: 6,
+              }}>
+                <a href={`/?t=${e.id}`} style={{ flex: 1, minWidth: 0, color: C.ink, textDecoration: "none" }}>
+                  <div className="bx-d" style={{ fontSize: 15.5, fontWeight: 700 }}>{e.name}</div>
+                  <div style={{ fontSize: 12, color: C.muted }}>
+                    {names[e.owner_id] || "Organiser"} · {new Date(e.created_at).toLocaleDateString()} · {state}
+                  </div>
+                </a>
+                {canRemove && (
+                  <button onClick={() => setAsk({ kind: "remove", event: e })} aria-label="Remove from series"
+                    style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 4 }}>
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {owner && (
+            <Btn tone="danger" style={{ marginTop: 16 }} onClick={() => setAsk({ kind: "delete" })}>
+              <Trash2 size={15} />Delete series
+            </Btn>
+          )}
+        </>
+      )}
+
+      {ask && ask.kind === "remove" && (
+        <Confirm title="Take this tournament out?"
+          body={`${ask.event.name} stops counting towards ${sr.name}. The tournament itself, and its confirmed ranking, are not touched.`}
+          confirmLabel="Take it out" tone="danger"
+          onConfirm={() => remove(ask.event)} onClose={() => setAsk(null)} />
+      )}
+      {ask && ask.kind === "delete" && (
+        <Confirm title="Delete this series?"
+          body="The grand total goes. Every tournament in it, and each one's confirmed ranking, stays exactly as it is."
+          confirmLabel="Delete series" tone="danger"
+          onConfirm={destroy} onClose={() => setAsk(null)} />
+      )}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
+/** Series requests waiting on this account, on the tournament list. */
+function SeriesRequests() {
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(null);
+  const load = () => seriesRequests().then(setRows);
+  useEffect(() => { load(); }, []);
+  if (!rows.length) return null;
+
+  const decide = async (r, yes) => {
+    setBusy(`${r.series_id}:${r.event_id}`);
+    if (yes) await linkToSeries(r.series_id, r.event_id);
+    else await removeFromSeries(r.series_id, r.event_id);
+    setBusy(null);
+    load();
+  };
+
+  return (
+    <div style={{ ...card, borderColor: `${C.gold}88`, marginBottom: 22 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <Trophy size={16} color={C.gold} />
+        <div className="bx-d" style={{ fontSize: 17, fontWeight: 700 }}>Series requests</div>
+        <span style={{ fontSize: 12, color: C.muted }}>{rows.length}</span>
+      </div>
+      {rows.map((r) => {
+        const key = `${r.series_id}:${r.event_id}`;
+        return (
+          <div key={key} style={{ borderTop: `1px solid ${C.line}66`, padding: "10px 0" }}>
+            <div style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 8 }}>
+              {r.asks === "series"
+                ? <><strong>{r.event_host}</strong> wants <strong>{r.event_name}</strong> ranked in your series <strong>{r.series_name}</strong>.</>
+                : <><strong>{r.series_owner}</strong> wants your tournament <strong>{r.event_name}</strong> ranked in their series <strong>{r.series_name}</strong>.</>}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn tone="primary" disabled={busy === key} style={{ padding: "6px 11px", fontSize: 13.5 }}
+                onClick={() => decide(r, true)}><Check size={14} />Approve</Btn>
+              <Btn tone="ghost" disabled={busy === key} style={{ padding: "6px 11px", fontSize: 13.5 }}
+                onClick={() => decide(r, false)}>Decline</Btn>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SheetFrame({ title, onClose, children }) {
   const swipeBack = useSwipeBack(onClose);
   return (
@@ -5679,6 +6142,8 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
             )}
           </div>
         )}
+
+        {profile && <SeriesRequests />}
 
         {/* Yours to run. */}
         {hosted.length > 0 && (

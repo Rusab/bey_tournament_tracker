@@ -339,6 +339,87 @@ export async function bladerEvents(id) {
   return data || [];
 }
 
+/* ------------------------------------------------------------------- series */
+
+/*
+ * A series ranks tournaments together. A tournament is in one once both the
+ * series' owner and the tournament's host have agreed; series_link carries
+ * the consent of whoever calls it, so the same call both asks and approves.
+ */
+
+const MEMBER_COLS = "series_id, event_id, owner_ok, host_ok, series:series_id(id, name, owner_id)";
+
+/** Every series these tournaments are in, or have been asked into. */
+export async function seriesOfEvents(eventIds) {
+  if (!eventIds.length) return [];
+  const { data, error } = await supabase.from("series_events").select(MEMBER_COLS).in("event_id", eventIds);
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+export async function loadSeries(id) {
+  const { data, error } = await supabase
+    .from("series").select("id, name, owner_id, created_at").eq("id", id).maybeSingle();
+  if (error) { console.error(error); return null; }
+  return data;
+}
+
+/** The tournaments in a series, with their data, newest first. */
+export async function seriesEvents(seriesId) {
+  const members = await supabase.from("series_events")
+    .select("event_id, owner_ok, host_ok").eq("series_id", seriesId);
+  if (members.error) { console.error(members.error); return null; }
+  const ids = members.data.map((m) => m.event_id);
+  if (!ids.length) return [];
+  const evs = await supabase.from("events")
+    .select("id, name, owner_id, created_at, format, data").in("id", ids)
+    .order("created_at", { ascending: false });
+  if (evs.error) { console.error(evs.error); return null; }
+  const byId = Object.fromEntries(members.data.map((m) => [m.event_id, m]));
+  return evs.data.map((e) => ({ ...e, approved: byId[e.id].owner_ok && byId[e.id].host_ok, ...byId[e.id] }));
+}
+
+/** Every tournament there is, archived ones included, for choosing one to link to. */
+export async function everyEvent() {
+  const { data, error } = await supabase
+    .from("events").select("id, name, owner_id, created_at, format, archived")
+    .order("created_at", { ascending: false });
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+export async function startSeries(name) {
+  const { data, error } = await supabase.from("series").insert({ name }).select("id, name, owner_id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("The series could not be started.") };
+  return { series: data };
+}
+
+/** Ask, or agree. Returns { status: "approved" | "pending" }. */
+export async function linkToSeries(seriesId, eventId) {
+  const { data, error } = await supabase.rpc("series_link", { p_series: seriesId, p_event: eventId });
+  if (error) return { error };
+  return { status: data };
+}
+
+/** Take a tournament out, or turn a request down. */
+export async function removeFromSeries(seriesId, eventId) {
+  const { error } = await supabase.rpc("series_remove", { p_series: seriesId, p_event: eventId });
+  return { error };
+}
+
+export async function deleteSeries(id) {
+  const { error } = await supabase.from("series").delete().eq("id", id);
+  return { error };
+}
+
+/** Requests waiting on this account's agreement. */
+export async function seriesRequests() {
+  const { data, error } = await supabase.rpc("series_requests");
+  if (error) return [];
+  return data || [];
+}
+
 /* ------------------------------------------------------------------- medals */
 
 /*
