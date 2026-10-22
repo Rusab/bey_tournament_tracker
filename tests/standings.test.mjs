@@ -31,10 +31,11 @@ function grab(name) {
   throw new Error("not found in App.jsx: " + name);
 }
 
-const names = ["num", "scoreOf", "winnerOf", "stageKeyForTeams", "stageOf", "finalStandings"];
+const names = ["num", "scoreOf", "winnerOf", "stageKeyForTeams", "stageOf", "finalStandings",
+  "rankingSnapshot", "rankingMoved"];
 const mod = await import(`data:text/javascript,${encodeURIComponent(
   names.map(grab).join("\n") + `\nexport { ${names.join(", ")} };`)}`);
-const { finalStandings } = mod;
+const { finalStandings, rankingSnapshot, rankingMoved } = mod;
 
 let fails = 0;
 const check = (label, got, want) => {
@@ -75,6 +76,24 @@ check("no number is skipped", [...new Set(rows.map((r) => r.rank))], [1, 2, 3, 4
   const all = finalStandings({ ...t, groupMatches: [beats("m1", "a", 2), beats("m2", "b", 2)] }, cfg);
   check("everyone level shares first", all.filter((r) => r.total === 2).map((r) => r.rank), [1, 1]);
   check("and whoever is behind them is second", all.find((r) => r.id === "z").rank, 2);
+}
+
+/* ---- a confirmed ranking ---- */
+{
+  const snap = rankingSnapshot(rows);
+  check("the snapshot keeps every blader in order", snap.map((r) => [r.rank, r.name, r.total]),
+    rows.map((r) => [r.rank, r.name, r.total]));
+  check("and is plain data that survives being saved",
+    JSON.parse(JSON.stringify(snap)), snap);
+  check("ranking the same results again does not count as moved", rankingMoved(snap, finalStandings(t, cfg)), false);
+
+  const corrected = { ...t, groupMatches: t.groupMatches.map((m) => (m.id === "m6" ? beats("m6", "f", 6) : m)) };
+  check("a corrected result that reorders the ranking is noticed",
+    rankingMoved(snap, finalStandings(corrected, cfg)), true);
+  check("while the snapshot itself is untouched", snap.find((r) => r.id === "f").rank, 4);
+
+  const reweighted = finalStandings(t, { ...cfg, perWin: "10" });
+  check("so is a weight that changes the totals", rankingMoved(snap, reweighted), true);
 }
 
 console.log(fails ? `\n${fails} FAILED` : "\nAll standings checks passed.");

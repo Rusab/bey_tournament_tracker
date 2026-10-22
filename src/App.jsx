@@ -1744,7 +1744,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           onReset={() => { setShowSetup(false); if (onDelete) onDelete(); }} />
       )}
       {showFinal && isAdmin && (
-        <FinalStandingsSheet t={t} onClose={() => setShowFinal(false)} />
+        <FinalStandingsSheet t={t} update={update} onClose={() => setShowFinal(false)} />
       )}
     </div>
   );
@@ -2832,7 +2832,19 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
         </div>
       )}
 
-      {finished && isAdmin && (
+      {t.finalRanking && isAdmin ? (
+        <div style={{ ...card, borderColor: `${C.green}88`, marginTop: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+            <Check size={17} color={C.green} />
+            <div className="bx-d" style={{ fontSize: 19, fontWeight: 700 }}>Final ranking confirmed</div>
+          </div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "58ch" }}>
+            Saved {new Date(t.finalRanking.confirmedAt).toLocaleString()}. Open it to see the ranking or
+            download the CSV; it only changes if you unlock it.
+          </div>
+          <Btn onClick={onFinal} tone="primary"><Medal size={15} />View final ranking</Btn>
+        </div>
+      ) : finished && isAdmin && (
         <div style={{ ...card, borderColor: `${C.gold}88`, marginTop: 14 }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>
             Generate final standings
@@ -2840,7 +2852,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
           <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "58ch" }}>
             Rank every blader on your own scoring — points per win and per margin, plus
             what each stage pays for playing and for winning. The champion need not come
-            out on top. Downloads a CSV of the whole tournament with it.
+            out on top. Confirm the ranking to save it for good, and download a CSV of the whole tournament.
           </div>
           <Btn onClick={onFinal} tone="primary"><Medal size={15} />Generate final standings</Btn>
         </div>
@@ -3936,17 +3948,60 @@ function Block({ title, hint, children }) {
   );
 }
 
-function FinalStandingsSheet({ t, onClose }) {
+/*
+ * The ranking, once confirmed, is kept in the tournament as it stood: the
+ * rows, the weights behind them and the Swiss King. It is never worked out
+ * again, so a result corrected later, or a weight nudged on another phone,
+ * cannot quietly reorder a ranking already announced.
+ */
+const rankingSnapshot = (rows) => rows.map((r) => ({
+  rank: r.rank, id: r.id, name: r.name, total: r.total, played: r.played, wins: r.wins,
+  losses: r.losses, margin: r.margin, pf: r.pf, pa: r.pa, bonus: r.bonus,
+}));
+
+/** Whether a fresh ranking would come out differently from the saved one. */
+const rankingMoved = (saved, fresh) =>
+  JSON.stringify(saved.map((r) => [r.id, r.rank, r.total]))
+  !== JSON.stringify(fresh.map((r) => [r.id, r.rank, r.total]));
+
+function FinalStandingsSheet({ t, onClose, update }) {
   const [cfg, setCfg] = useState(loadScoring);
+  const [ask, setAsk] = useState(null);   // "confirm" | "unlock"
   const swipeBack = useSwipeBack(onClose);
 
   useEffect(() => {
     try { localStorage.setItem(SCORING_KEY, JSON.stringify(cfg)); } catch (e) { /* private mode */ }
   }, [cfg]);
 
+  const saved = t.finalRanking || null;
   const stages = stagesFor(t.koSize, t.thirdPlace);
-  const kings = useMemo(() => swissKings(t), [t]);
-  const rows = useMemo(() => finalStandings(t, cfg), [t, cfg]);
+  const liveKings = useMemo(() => swissKings(t), [t]);
+  const live = useMemo(() => finalStandings(t, saved ? saved.cfg : cfg), [t, cfg, saved]);
+
+  // Confirmed: what was saved. Not yet: what the weights give right now.
+  const rows = saved ? saved.rows : live;
+  const kings = saved ? saved.kings : liveKings;
+  const usedCfg = saved ? saved.cfg : cfg;
+  const moved = !!saved && rankingMoved(saved.rows, live);
+
+  const confirmRanking = () => {
+    update((d) => {
+      d.finalRanking = {
+        confirmedAt: new Date().toISOString(),
+        cfg: JSON.parse(JSON.stringify(cfg)),
+        rows: rankingSnapshot(live),
+        kings: liveKings.map((k) => ({ id: k.id, name: k.name, wins: k.wins, margin: k.margin })),
+      };
+      return d;
+    });
+    setAsk(null);
+  };
+  const unlockRanking = () => {
+    // The weights it was confirmed with come back, so unlocking alone moves nobody.
+    setCfg(saved.cfg);
+    update((d) => { delete d.finalRanking; return d; });
+    setAsk(null);
+  };
 
   const setStage = (key, field, v) =>
     setCfg((c) => ({ ...c, stages: { ...c.stages, [key]: { ...c.stages[key], [field]: v } } }));
@@ -3970,6 +4025,27 @@ function FinalStandingsSheet({ t, onClose }) {
       {/* The Swiss King belongs on the Standings tab; here it is only carried
           into the CSV. This page is for setting the weights. */}
       <div style={{ padding: 16, maxWidth: 720, margin: "0 auto" }}>
+        {saved && (
+          <div style={{ ...card, borderColor: `${C.green}88`, marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+              <Check size={17} color={C.green} />
+              <div className="bx-d" style={{ fontSize: 17, fontWeight: 700 }}>Ranking confirmed</div>
+            </div>
+            <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5 }}>
+              Saved {new Date(saved.confirmedAt).toLocaleString()}, with {num(usedCfg.perWin)} per win
+              and {num(usedCfg.perMargin)} per margin point. It stays exactly as it is whatever
+              changes later, until it is unlocked.
+            </div>
+            {moved && (
+              <div style={{ color: C.gold, fontSize: 13, lineHeight: 1.5, marginTop: 8 }}>
+                Results have changed since it was confirmed, and ranking them now would come out
+                differently. The saved ranking has not moved; unlock it to rank again.
+              </div>
+            )}
+          </div>
+        )}
+
+        {!saved && (<>
         <Block title="Every win is worth"
           hint="Margin counts only for the blader who won, the same margin shown in Standings. Both are added to whatever the stage below pays.">
           <div style={{ display: "flex", gap: 10 }}>
@@ -4003,12 +4079,15 @@ function FinalStandingsSheet({ t, onClose }) {
             ))}
           </div>
         </Block>
+        </>)}
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "26px 0 10px" }}>
           <Blade color={C.gold} h={18} />
           <h3 className="bx-d" style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>The ranking</h3>
-          <Btn onClick={() => setCfg(defaultScoring())} tone="ghost"
-            style={{ marginLeft: "auto", padding: "6px 10px", fontSize: 13 }}>Reset weights</Btn>
+          {!saved && (
+            <Btn onClick={() => setCfg(defaultScoring())} tone="ghost"
+              style={{ marginLeft: "auto", padding: "6px 10px", fontSize: 13 }}>Reset weights</Btn>
+          )}
         </div>
 
         <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: 18 }}>
@@ -4047,11 +4126,40 @@ function FinalStandingsSheet({ t, onClose }) {
           </div>
         )}
 
-        <Btn tone="primary" disabled={rows.length === 0}
-          onClick={() => downloadCSV(`${slug(t.name)}-final-standings.csv`, buildFinalCSV(t, cfg, rows, kings))}
+        {!saved && update && (
+          <Btn tone="primary" disabled={rows.length === 0} onClick={() => setAsk("confirm")}
+            style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 17, marginBottom: 10 }}>
+            <Check size={18} />Confirm ranking
+          </Btn>
+        )}
+        <Btn tone={saved ? "primary" : "default"} disabled={rows.length === 0}
+          onClick={() => downloadCSV(`${slug(t.name)}-final-standings.csv`, buildFinalCSV(t, usedCfg, rows, kings))}
           style={{ width: "100%", justifyContent: "center", padding: 15, fontSize: 17 }}>
           <Download size={18} />Download the CSV
         </Btn>
+        {saved && update && (
+          <Btn tone="ghost" onClick={() => setAsk("unlock")}
+            style={{ width: "100%", justifyContent: "center", padding: 12, fontSize: 14.5, marginTop: 10 }}>
+            <Unlock size={15} />Unlock to change the ranking
+          </Btn>
+        )}
+
+        {ask === "confirm" && (
+          <Confirm
+            title="Confirm this ranking?"
+            body="It is saved exactly as shown, with these weights, and stays that way even if a result or a weight changes later. You can unlock it again if you need to."
+            confirmLabel="Confirm ranking" tone="primary"
+            onConfirm={confirmRanking} onClose={() => setAsk(null)} />
+        )}
+        {ask === "unlock" && (
+          <Confirm
+            title="Unlock the ranking?"
+            body={moved
+              ? "The confirmed ranking is removed. Results have changed since it was saved, so the ranking will come out differently once unlocked."
+              : "The confirmed ranking is removed and the weights can be changed again. Nothing moves until you change something."}
+            confirmLabel="Unlock" tone="danger"
+            onConfirm={unlockRanking} onClose={() => setAsk(null)} />
+        )}
         <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, lineHeight: 1.5, maxWidth: "58ch" }}>
           The file holds this ranking, the weights behind it, the Swiss King, and every
           match point by point — so nothing is lost when the tournament is cleared.
