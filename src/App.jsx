@@ -563,7 +563,10 @@ function buildGroupMatches(groups, existing = []) {
     roundRobin(g.playerIds).forEach(([a, b]) => {
       const id = pairKey(g.id, a, b);
       const old = prev.get(id);
-      out.push(old ? { ...old, p1: a, p2: b } : { id, groupId: g.id, p1: a, p2: b, events: [], done: false });
+      // A surviving fixture keeps its own sides: the round robin can list the
+      // pair the other way round once someone leaves, and flipping p1 and p2
+      // under a saved result would hand the win to the loser.
+      out.push(old ? { ...old } : { id, groupId: g.id, p1: a, p2: b, events: [], done: false });
     });
   });
   return out;
@@ -1483,6 +1486,61 @@ function useSwipeBack(onBack) {
   };
 }
 
+/** Every match in the tournament: the group stage, the bracket, the third-place match. */
+function allMatchesOf(t) {
+  return [
+    ...((t && t.groupMatches) || []),
+    ...(t && t.bracket ? t.bracket.rounds.flat() : []),
+    ...(t && t.bracket && t.bracket.third ? [t.bracket.third] : []),
+  ];
+}
+
+/*
+ * Protect played matches.
+ *
+ * A saved result is only ever taken away by opening that match and saving it
+ * empty. Any other change — a redraw, a rebuilt bracket, a blader moved or
+ * removed, a knockout round set by hand — is refused while it would wipe
+ * a result, and the matches in the way are listed.
+ *
+ * lostResults compares the tournament before and after a change and returns
+ * the matches that held a result and no longer hold the same one: gone, its
+ * finishes changed, or its players changed. `allow` names the matches the
+ * change is meant to touch — the one being scored.
+ */
+function lostResults(before, after, allow = []) {
+  const now = new Map(allMatchesOf(after).map((m) => [m.id, m]));
+  const same = (a, b) => JSON.stringify(a || []) === JSON.stringify(b || []);
+  return allMatchesOf(before).filter((m) => {
+    if (!(m.events || []).length || allow.includes(m.id)) return false;
+    const n = now.get(m.id);
+    return !n || !same(n.events, m.events) || (n.p1 || null) !== (m.p1 || null) || (n.p2 || null) !== (m.p2 || null);
+  });
+}
+
+const protects = (t) => !!t && t.protectResults !== false;
+
+/** Where a match sits and how it stands, for listing the ones in the way. */
+function matchLabel(t, m, nameOf) {
+  let where = "Match", order = 0;
+  if (m.groupId) {
+    const g = t.groups.find((x) => x.id === m.groupId);
+    where = g ? g.name : "Group";
+  } else if (m.id === "k:third") {
+    where = "Third place"; order = 9000; // fed by the semis, so cleared before them
+  } else if (t.bracket) {
+    t.bracket.rounds.forEach((r, ri) => r.forEach((x, i) => {
+      if (x.id === m.id) {
+        where = r.length === 1 ? "Final" : `${roundName(r.length * 2)} M${i + 1}`;
+        order = 1000 + ri * 10;
+      }
+    }));
+  }
+  const { s1, s2 } = scoreOf(m);
+  const who = `${m.p1 ? nameOf(m.p1) : "TBD"} v ${m.p2 ? nameOf(m.p2) : "TBD"}`;
+  return { id: m.id, kind: m.groupId ? "group" : "ko", where, who, score: `${s1}–${s2}`, order };
+}
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -1509,6 +1567,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [tab, setTab] = useState(initialTab);
   const [scoring, setScoring] = useState(null);
   const [editRound, setEditRound] = useState(null);   // knockout round being set by hand
+  const [blocked, setBlocked] = useState(null);       // a change refused: { what, ids, fromScore }
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
@@ -1693,7 +1752,27 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
     ...(t.bracket && t.bracket.third ? [t.bracket.third] : []),
   ];
 
-  const update = (fn) => setT((prev) => fn(structuredClone(prev)));
+  const protect = protects(t);
+
+  /*
+   * Whether a change may go ahead. With Protect played matches on, one that
+   * would wipe a saved result is refused and the matches in the way are
+   * shown instead. Views ask first so they can skip their own warnings;
+   * update() asks again, so nothing gets past it.
+   */
+  const check = (fn, what = "This change", allow = [], fromScore = false) => {
+    if (!protect) return true;
+    const lost = lostResults(t, fn(structuredClone(t)), allow);
+    if (!lost.length) return true;
+    setBlocked({ what, ids: lost.map((m) => m.id), fromScore });
+    return false;
+  };
+
+  const update = (fn, opts = {}) => {
+    if (!check(fn, opts.what, opts.allow, opts.fromScore)) return false;
+    setT((prev) => fn(structuredClone(prev)));
+    return true;
+  };
 
   /*
    * The sets are stored beside the finishes because propagate() and every
@@ -1702,7 +1781,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
    */
   const saveScore = (kind, id, events, done, sets) => {
     const put = (m) => { m.events = events; m.done = done; m.sets = sets && sets.length > 1 ? sets : null; };
-    update((d) => {
+    return update((d) => {
       if (kind === "group") {
         const m = d.groupMatches.find((x) => x.id === id);
         if (m) put(m);
@@ -1717,12 +1796,13 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
         d.bracket = propagate(d.bracket);
       }
       return d;
-    });
+    }, { what: events.length ? "Saving this result" : "Clearing this result", allow: [id], fromScore: true });
   };
 
   const saveRound = (r, value) => {
-    update((d) => { d.bracket = setRound(d.bracket, r, value); return d; });
-    setEditRound(null);
+    if (update((d) => { d.bracket = setRound(d.bracket, r, value); return d; }, { what: "Changing these matchups" })) {
+      setEditRound(null);
+    }
   };
 
   const scoringMatch = scoring ? allMatches.find((m) => m.id === scoring.id) : null;
@@ -1794,11 +1874,11 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       }}>
         {/* Keyed on the tab so the entrance animation restarts on every change. */}
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
-          {tab === "groups" && <GroupsView t={t} update={update} nameOf={nameOf} isAdmin={isAdmin} eventId={eventId} />}
+          {tab === "groups" && <GroupsView t={t} update={update} check={check} nameOf={nameOf} isAdmin={isAdmin} eventId={eventId} />}
           {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
             group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
-          {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} isAdmin={isAdmin}
+          {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} check={check} isAdmin={isAdmin}
             group={group} setGroup={setGroup} onPlayer={setDetail} onFinal={() => setShowFinal(true)}
             eventId={eventId} isOwner={isOwner} meId={meId} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
@@ -1844,11 +1924,11 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
         <ScoreSheet
           match={scoringMatch} t={t} nameOf={nameOf}
           onClose={() => setScoring(null)}
-          onSave={(events, done, sets) => { saveScore(scoring.kind, scoring.id, events, done, sets); setScoring(null); }}
+          onSave={(events, done, sets) => { if (saveScore(scoring.kind, scoring.id, events, done, sets)) setScoring(null); }}
         />
       )}
       {editRound !== null && isAdmin && t.bracket && t.bracket.rounds[editRound] && (
-        <BracketEditor t={t} round={editRound} nameOf={nameOf}
+        <BracketEditor t={t} round={editRound} nameOf={nameOf} protect={protect}
           onClose={() => setEditRound(null)}
           onSave={(value) => saveRound(editRound, value)} />
       )}
@@ -1859,6 +1939,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       )}
       {showSetup && isAdmin && (
         <SettingsSheet t={t} update={update} onClose={() => setShowSetup(false)}
+          isOwner={isOwner}
           onReferees={isOwner ? onReferees : null}
           canDelete={isOwner}
           onReset={() => { setShowSetup(false); if (onDelete) onDelete(); }} />
@@ -1866,7 +1947,77 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       {showFinal && isAdmin && (
         <FinalStandingsSheet t={t} update={update} onClose={() => setShowFinal(false)} />
       )}
+      {blocked && (
+        <ResultsInTheWay t={t} nameOf={nameOf} block={blocked} isOwner={isOwner}
+          onClose={() => setBlocked(null)}
+          onOpen={blocked.fromScore ? null : (row) => {
+            setBlocked(null); setShowSetup(false); setEditRound(null);
+            setScoring({ kind: row.kind, id: row.id });
+          }} />
+      )}
     </div>
+  );
+}
+
+/**
+ * The matches standing in the way of a change, latest first: a knockout
+ * match can only be cleared once the match it feeds is empty, so the list
+ * reads in the order to clear them.
+ */
+function ResultsInTheWay({ t, nameOf, block, isOwner, onClose, onOpen }) {
+  const rows = allMatchesOf(t).filter((m) => block.ids.includes(m.id))
+    .map((m) => matchLabel(t, m, nameOf))
+    .sort((a, b) => b.order - a.order);
+  const n = rows.length;
+  const ko = rows.some((r) => r.kind === "ko");
+  return createPortal(
+    <div className="bx" style={{
+      position: "fixed", inset: 0, zIndex: 95, background: "#0B0718EE",
+      display: "grid", placeItems: "center", padding: 20, color: C.ink,
+    }}>
+      <div style={{
+        width: "100%", maxWidth: 440, maxHeight: "86vh", overflowY: "auto", background: C.surface,
+        border: `1px solid ${C.line}`, borderRadius: 4, padding: 20,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <Blade color={C.magenta} h={24} />
+          <h2 className="bx-d" style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>
+            Reset {n > 1 ? "these matches" : "this match"} first
+          </h2>
+        </div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: "0 0 14px" }}>
+          {block.what} would wipe {n > 1 ? `${n} saved results` : "a saved result"}. Played matches are
+          protected, so a result only goes when you clear it yourself: open the match, press
+          Reset, then save it as not played.
+          {ko && " Work down from the top: a knockout match can't be cleared while the match it feeds still has a result."}
+        </p>
+        <div style={{ marginBottom: 16 }}>
+          {rows.map((r) => (
+            <button key={r.id} onClick={onOpen ? () => onOpen(r) : undefined} disabled={!onOpen}
+              style={{
+                width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left",
+                background: C.raised, border: `1px solid ${C.line}`, borderLeft: `3px solid ${C.gold}`,
+                borderRadius: 3, padding: "10px 12px", marginBottom: 6, color: C.ink,
+                cursor: onOpen ? "pointer" : "default",
+              }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span className="bx-d" style={{ display: "block", fontSize: 12, color: C.muted }}>{r.where}</span>
+                <span style={{ display: "block", fontSize: 14.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.who}</span>
+              </span>
+              <span className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>{r.score}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5, marginBottom: 14 }}>
+          {onOpen ? "Tap a match to open it. " : ""}
+          {isOwner
+            ? "To make bulk changes instead, switch off Protect played matches in Settings."
+            : "The host can switch off Protect played matches in Settings."}
+        </div>
+        <Btn onClick={onClose} tone="ghost" style={{ width: "100%", justifyContent: "center", padding: 12 }}>Got it</Btn>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2384,7 +2535,7 @@ function Setup({ onCreate }) {
 /*  Groups                                                             */
 /* ================================================================== */
 
-function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
+function GroupsView({ t, update, check, nameOf, isAdmin, eventId }) {
   const [moving, setMoving] = useState(null);
   const [ask, setAsk] = useState(null);         // null | "redraw" | "blocked"
   const [pending, setPending] = useState(null); // a move/remove awaiting confirmation
@@ -2392,20 +2543,21 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
   const assigned = new Set(t.groups.flatMap((g) => g.playerIds));
   const unassigned = t.players.filter((p) => !assigned.has(p.id));
 
-  const draw = () => {
-    update((d) => {
-      const ids = d.players.map((p) => p.id);
-      for (let i = ids.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [ids[i], ids[j]] = [ids[j], ids[i]];
-      }
-      d.groups.forEach((g) => (g.playerIds = []));
-      ids.forEach((id, i) => d.groups[i % d.groups.length].playerIds.push(id));
-      d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
-      return d;
-    });
-    setAsk(null);
+  // A bracket seeded from the old groups would be a fiction, so it goes too.
+  const drawFn = (d) => {
+    const ids = d.players.map((p) => p.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    d.groups.forEach((g) => (g.playerIds = []));
+    ids.forEach((id, i) => d.groups[i % d.groups.length].playerIds.push(id));
+    d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
+    d.bracket = null;
+    return d;
   };
+  const draw = () => { update(drawFn, { what: "Redrawing the groups" }); setAsk(null); };
+  const protect = protects(t);
 
   const scored = scoredCount(t);
   const alreadyDrawn = t.groups.some((g) => g.playerIds.length > 0);
@@ -2414,8 +2566,13 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
   // it is refused rather than merely confirmed — clearing the results has to be
   // a separate, deliberate act.
   const onDrawClick = () => {
-    if (scored > 0) setAsk("blocked");
-    else if (alreadyDrawn) setAsk("redraw");
+    // The draw is random, so the check assumes the worst: every fixture goes.
+    const everyFixture = (d) => { d.groupMatches = []; d.bracket = null; return d; };
+    if (protect ? !check(everyFixture, "Redrawing the groups") : scored > 0) {
+      if (!protect) setAsk("blocked");
+      return;
+    }
+    if (alreadyDrawn) setAsk("redraw");
     else draw();
   };
 
@@ -2449,29 +2606,31 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
     setEntry("");
   };
 
+  const moveFn = (playerId, gid) => (d) => {
+    d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
+    if (gid) d.groups.find((g) => g.id === gid).playerIds.push(playerId);
+    // Fixtures against their old group cease to exist, and with them any
+    // results those fixtures held.
+    d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
+    return d;
+  };
   const moveTo = (playerId, gid) => {
-    update((d) => {
-      d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
-      if (gid) d.groups.find((g) => g.id === gid).playerIds.push(playerId);
-      // Fixtures against their old group cease to exist, and with them any
-      // results those fixtures held.
-      d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
-      return d;
-    });
+    update(moveFn(playerId, gid), { what: `Moving ${nameOf(playerId)}` });
     setMoving(null); setPending(null);
   };
 
+  const removeFn = (playerId) => (d) => {
+    d.players = d.players.filter((p) => p.id !== playerId);
+    d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
+    d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
+    // A bracket holding a blader who no longer exists is a fiction.
+    if (bracketMatches(d.bracket).some((m) => m.p1 === playerId || m.p2 === playerId)) {
+      d.bracket = null;
+    }
+    return d;
+  };
   const removePlayer = (playerId) => {
-    update((d) => {
-      d.players = d.players.filter((p) => p.id !== playerId);
-      d.groups.forEach((g) => (g.playerIds = g.playerIds.filter((x) => x !== playerId)));
-      d.groupMatches = buildGroupMatches(d.groups, d.groupMatches);
-      // A bracket holding a blader who no longer exists is a fiction.
-      if (bracketMatches(d.bracket).some((m) => m.p1 === playerId || m.p2 === playerId)) {
-        d.bracket = null;
-      }
-      return d;
-    });
+    update(removeFn(playerId), { what: `Removing ${nameOf(playerId)}` });
     setMoving(null); setPending(null);
   };
 
@@ -2479,11 +2638,13 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
   const askMove = (playerId, gid) => {
     const from = groupOf(playerId);
     if (gid && from && from.id === gid) { setMoving(null); return; }
+    if (!check(moveFn(playerId, gid), `Moving ${nameOf(playerId)}`)) return;
     if (playedBy(playerId) > 0) setPending({ kind: "move", pid: playerId, gid });
     else moveTo(playerId, gid);
   };
 
   const askRemove = (playerId) => {
+    if (!check(removeFn(playerId), `Removing ${nameOf(playerId)}`)) return;
     if (playedBy(playerId) > 0 || inBracket(playerId)) setPending({ kind: "remove", pid: playerId });
     else removePlayer(playerId);
   };
@@ -2503,7 +2664,8 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
       {ask === "redraw" && (
         <Confirm
           title="Redraw the groups?"
-          body="Everyone is reshuffled at random and all fixtures are rebuilt. The current group arrangement is lost."
+          body={"Everyone is reshuffled at random and all fixtures are rebuilt. The current group arrangement is lost."
+            + (t.bracket ? " The knockout bracket is removed too — rebuild it from the Table tab." : "")}
           confirmLabel="Redraw" onConfirm={draw} onClose={() => setAsk(null)}
         />
       )}
@@ -2590,7 +2752,7 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
           <div style={{ fontSize: 13.5, marginBottom: 9 }}>
             Move <strong>{nameOf(moving)}</strong> to
             {playedBy(moving) > 0 && (
-              <span style={{ color: C.gold }}> — {playedBy(moving)} played match{playedBy(moving) > 1 ? "es" : ""} at stake</span>
+              <span style={{ color: C.gold }}> — {playedBy(moving)} played match{playedBy(moving) > 1 ? "es" : ""} {protect ? "to reset first" : "at stake"}</span>
             )}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -2757,7 +2919,7 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pend
 /*  Standings                                                          */
 /* ================================================================== */
 
-function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFinal, eventId, isOwner, meId }) {
+function TableView({ t, nameOf, update, check, onPlayer, isAdmin, group, setGroup, onFinal, eventId, isOwner, meId }) {
   const allPlayed = t.groupMatches.length > 0 && t.groupMatches.every((m) => m.done);
   const everything = everyMatch(t);
   const playedCount = everything.filter((m) => m.done).length;
@@ -2790,20 +2952,21 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
     return next;
   });
 
+  const buildFn = (d) => {
+    const paired = template === "paired" && pairedFits(d.groups, d.advance, d.koSize);
+    if (paired) {
+      const order = pairingOrder(d.groups, pairs);
+      d.bracket = buildPairedBracket(d.groups, d.groupMatches, d.advance, d.koSize, d.thirdPlace, nameOf, d.tieBreaks, order);
+      d.groupPairs = order;
+    } else {
+      const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf, d.tieBreaks);
+      d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
+    }
+    d.bracketTemplate = paired ? "paired" : "standard";
+    return d;
+  };
   const makeBracket = () => {
-    update((d) => {
-      const paired = template === "paired" && pairedFits(d.groups, d.advance, d.koSize);
-      if (paired) {
-        const order = pairingOrder(d.groups, pairs);
-        d.bracket = buildPairedBracket(d.groups, d.groupMatches, d.advance, d.koSize, d.thirdPlace, nameOf, d.tieBreaks, order);
-        d.groupPairs = order;
-      } else {
-        const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf, d.tieBreaks);
-        d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
-      }
-      d.bracketTemplate = paired ? "paired" : "standard";
-      return d;
-    });
+    update(buildFn, { what: t.bracket ? "Rebuilding the bracket" : "Building the bracket" });
     setAsk(false);
   };
 
@@ -2999,7 +3162,10 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
               </div>
             </div>
           )}
-          <Btn onClick={() => (t.bracket ? setAsk(true) : makeBracket())}
+          <Btn onClick={() => {
+            if (t.bracket && !check(buildFn, "Rebuilding the bracket")) return;
+            if (t.bracket) setAsk(true); else makeBracket();
+          }}
             tone={allPlayed ? "primary" : "default"}>
             <GitBranch size={15} />{t.bracket ? "Rebuild bracket" : "Build bracket"}
           </Btn>
@@ -3202,6 +3368,8 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
   const selfKO = selfKOFor(t);
   const run = splitSets(events, target, bestOf);
   const over = run.decided;
+  // Reset on a match that has a saved result: saving now clears it.
+  const clearing = !events.length && (match.events || []).length > 0;
 
   // The big numbers are the set being played — or the last one, once the match
   // is over, since the set in progress resets to nothing the moment it closes.
@@ -3450,10 +3618,18 @@ function ScoreSheet({ match, t, nameOf, onClose, onSave }) {
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <Btn onClick={tryClose} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 14 }}>Cancel</Btn>
-          <Btn onClick={() => onSave(events, over, run.sets)} tone="primary" disabled={!over}
-            style={{ flex: 2, justifyContent: "center", padding: 14, fontSize: 17 }}>Save result</Btn>
+          <Btn onClick={() => (clearing ? onSave([], false, []) : onSave(events, over, run.sets))}
+            tone={clearing ? "danger" : "primary"} disabled={!over && !clearing}
+            style={{ flex: 2, justifyContent: "center", padding: 14, fontSize: 17 }}>
+            {clearing ? "Save as not played" : "Save result"}
+          </Btn>
         </div>
-        {!over && (
+        {clearing && (
+          <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, textAlign: "center", lineHeight: 1.5 }}>
+            Saving clears this match's result, as if it had never been played.
+          </div>
+        )}
+        {!over && !clearing && (
           <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, textAlign: "center" }}>
             {bestOf > 1
               ? `Save unlocks when someone takes ${run.need} set${run.need > 1 ? "s" : ""}.`
@@ -4390,20 +4566,21 @@ function FinalStandingsSheet({ t, onClose, update }) {
   );
 }
 
-function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
+function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete, isOwner }) {
   const [confirm, setConfirm] = useState(false);
   const [askClear, setAskClear] = useState(false);
   const scored = scoredCount(t);
+  const protect = protects(t);
   const selfKO = selfKOFor(t);
 
   /* Scores go, the shape of the tournament stays. The bracket goes too: it was
      seeded from standings that no longer exist, so it would be a fiction. */
   const clearResults = () => {
     update((d) => {
-      d.groupMatches.forEach((m) => { m.events = []; m.done = false; });
+      d.groupMatches.forEach((m) => { m.events = []; m.done = false; m.sets = null; });
       d.bracket = null;
       return d;
-    });
+    }, { what: "Resetting every result" });
     setAskClear(false);
   };
 
@@ -4486,14 +4663,32 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete }) {
         </label>
 
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+          <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Protect played matches</div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
+            While this is on, nothing can wipe a saved result — not a redraw, a rebuilt
+            bracket, or moving or removing a blader. Clear the matches in the way first: open
+            each one, press Reset, and save it as not played.
+            {!isOwner && " Only the host can switch this off."}
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: isOwner ? "pointer" : "default" }}>
+            <input type="checkbox" checked={protect} disabled={!isOwner}
+              onChange={(e) => update((d) => { d.protectResults = e.target.checked; return d; })}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Protect played matches</span>
+          </label>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
           <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Reset match results</div>
           <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
-            Wipes every score but keeps the bladers and the groups. Do this before
-            redrawing the groups — {scored > 0
+            {protect
+              ? "Wiping every score at once is off while played matches are protected. Switch protection off above to use it, or clear the matches one at a time."
+              : "Wipes every score but keeps the bladers and the groups. Do this before redrawing the groups"}
+            {!protect && <> — {scored > 0
               ? `${scored} match${scored > 1 ? "es have" : " has"} been scored so far.`
-              : "nothing has been scored yet."}
+              : "nothing has been scored yet."}</>}
           </div>
-          <Btn onClick={() => setAskClear(true)} tone="danger" disabled={scored === 0}>
+          <Btn onClick={() => setAskClear(true)} tone="danger" disabled={scored === 0 || protect}>
             <Undo2 size={15} />Reset results
           </Btn>
         </div>
@@ -4844,7 +5039,7 @@ function ordinal(n) {
  * Picking something already placed elsewhere swaps the two, so nobody can be
  * in two matches at once and no earlier match can be left feeding nothing.
  */
-function BracketEditor({ t, round, nameOf, onClose, onSave }) {
+function BracketEditor({ t, round, nameOf, protect, onClose, onSave }) {
   const b = t.bracket;
   const ms = b.rounds[round];
   const opening = round === 0;
@@ -4914,6 +5109,11 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
 
   const plain = !opening && JSON.stringify(pairs) === JSON.stringify(defaultFeed(ms.length));
   const nothing = !changed.some(Boolean);
+  // With played matches protected, everything this would wipe, down the bracket.
+  const inTheWay = protect && !nothing
+    ? lostResults(t, { ...t, bracket: setRound(b, round, pairs) }).map((m) => matchLabel(t, m, nameOf))
+        .sort((x, y) => y.order - x.order)
+    : [];
 
   const pick = (value, onChange, options) => (
     <select value={value} onChange={(e) => onChange(e.target.value)}
@@ -4960,14 +5160,20 @@ function BracketEditor({ t, round, nameOf, onClose, onSave }) {
           No longer in the bracket: {dropped.map(nameOf).join(", ")}.
         </div>
       )}
-      {losing.length > 0 && (
+      {inTheWay.length > 0 ? (
+        <div style={{ fontSize: 13, color: C.magenta, margin: "10px 0", lineHeight: 1.5 }}>
+          Played matches are protected, so {inTheWay.length > 1 ? "these need" : "this needs"} clearing
+          first — open {inTheWay.length > 1 ? "each" : "it"}, press Reset and save it as not played,
+          from the top down: {inTheWay.map((x) => `${x.where} (${x.who}, ${x.score})`).join("; ")}.
+        </div>
+      ) : !protect && losing.length > 0 && (
         <div style={{ fontSize: 13, color: C.magenta, margin: "10px 0", lineHeight: 1.5 }}>
           Saving clears the result of {losing.join(", ")}, and of anything {losing.length > 1 ? "they" : "it"} fed into.
         </div>
       )}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-        <Btn onClick={() => onSave(pairs)} tone="primary" disabled={nothing}>
+        <Btn onClick={() => onSave(pairs)} tone="primary" disabled={nothing || inTheWay.length > 0}>
           <Check size={15} />Save matchups
         </Btn>
         {!opening && !plain && (
