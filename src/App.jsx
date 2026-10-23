@@ -15,7 +15,7 @@ import {
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
   sendPasswordReset, setPassword,
   myEvents, publicEvents, createEvent, archiveEvent, deleteEvent,
-  eventReferees, addReferee, removeReferee, pendingHosts, approveHost,
+  eventReferees, addReferee, addRefereeById, removeReferee, pendingHosts, approveHost,
   listBladers, loadBlader, bladerRealName, bladerNameFree, saveBlader, saveRealName,
   avatarUrl, uploadAvatar, removeAvatar,
   bladerNames, listMedals, amAwarder, addMedal, removeMedal,
@@ -3481,7 +3481,7 @@ function LinkPanel({ t, playerId, update, eventId }) {
  * Real names show, and can be searched, only for someone allowed to see them;
  * the list itself decides that.
  */
-function BladerPicker({ title = "Choose a blader", taken, onPick, onClose }) {
+function BladerPicker({ title = "Choose a blader", taken, takenLabel = "already in this tournament", onPick, onClose }) {
   const [rows, setRows] = useState(undefined);
   const [q, setQ] = useState("");
   useEffect(() => { bladerDirectory().then(setRows); }, []);
@@ -3520,7 +3520,7 @@ function BladerPicker({ title = "Choose a blader", taken, onPick, onClose }) {
               </div>
               {(r.real_name || used) && (
                 <div style={{ fontSize: 12, color: C.muted }}>
-                  {[r.real_name, used ? "already in this tournament" : null].filter(Boolean).join(" · ")}
+                  {[r.real_name, used ? takenLabel : null].filter(Boolean).join(" · ")}
                 </div>
               )}
             </div>
@@ -5376,6 +5376,17 @@ function RefereeSheet({ event, onClose }) {
   const [email, setEmail] = useState("");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
+
+  // Chosen from the list: the owner, and anyone already a referee, are greyed out.
+  const pick = async (b) => {
+    setPicking(false); setBusy(true); setMsg(null);
+    const { error } = await addRefereeById(event.id, b.id);
+    setBusy(false);
+    if (error) { setMsg({ tone: C.magenta, text: error.message }); return; }
+    setMsg({ tone: C.green, text: `${b.blader_name} can now run this tournament.` });
+    refresh();
+  };
 
   const refresh = () => eventReferees(event.id).then(setRows);
   useEffect(() => { refresh(); }, [event.id]);
@@ -5400,16 +5411,25 @@ function RefereeSheet({ event, onClose }) {
       </div>
 
       <Block title="Add someone"
-        hint="They need an account already, and the address is the one they signed up with. Being a referee needs no approval.">
+        hint="Choose anyone who has signed up, or type the address they signed up with. Being a referee needs no approval.">
+        <Btn tone="primary" disabled={busy} onClick={() => setPicking(true)}
+          style={{ width: "100%", justifyContent: "center", marginBottom: 10 }}>
+          <Users size={16} />Choose from registered bladers
+        </Btn>
         <div style={{ display: "flex", gap: 8 }}>
           <input style={inputStyle} type="email" value={email} placeholder="their@email.com"
             onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
             onKeyDown={(e) => e.key === "Enter" && add()} />
-          <Btn onClick={add} tone="primary" disabled={busy} style={{ flexShrink: 0 }}>
+          <Btn onClick={add} disabled={busy} style={{ flexShrink: 0 }}>
             <Plus size={16} />Add
           </Btn>
         </div>
         {msg && <div style={{ color: msg.tone, fontSize: 13, marginTop: 9, lineHeight: 1.5 }}>{msg.text}</div>}
+        {picking && (
+          <BladerPicker title="Choose a referee" takenLabel="already has access"
+            taken={new Set([event.owner_id, ...(rows || []).map((r) => r.userId)])}
+            onPick={pick} onClose={() => setPicking(false)} />
+        )}
       </Block>
 
       {rows === null ? (

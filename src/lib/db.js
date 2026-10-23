@@ -215,6 +215,18 @@ export async function addReferee(eventId, email) {
   return { user: found };
 }
 
+/**
+ * The same, for someone chosen from the bladers list rather than looked up by
+ * email: the list already says who they are. The row policy still checks
+ * that only the tournament's owner can grant it.
+ */
+export async function addRefereeById(eventId, userId) {
+  const { error } = await supabase.from("event_referees").insert({ event_id: eventId, user_id: userId });
+  if (!error) return {};
+  if (error.code === "23505") return { error: new Error("They already have access.") };
+  return { error };
+}
+
 export const removeReferee = (eventId, userId) =>
   supabase.from("event_referees").delete().eq("event_id", eventId).eq("user_id", userId);
 
