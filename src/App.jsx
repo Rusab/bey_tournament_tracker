@@ -106,6 +106,22 @@ const linkedIds = (players) =>
 
 const isLinked = (p) => !!(p.profileId || (p.memberIds || []).some(Boolean));
 
+/**
+ * The small link beside a player with a blader profile, for everyone to see:
+ * a visitor can tell who is a registered blader and who was entered by name
+ * alone. A team carries it when any of its members is linked.
+ */
+function LinkMark({ t, id, size = 12 }) {
+  const p = ((t && t.players) || []).find((x) => x.id === id);
+  if (!p || !isLinked(p)) return null;
+  return (
+    <span title="Linked to a blader profile" aria-label="linked to a blader profile"
+      style={{ display: "inline-flex", verticalAlign: "-1px", marginLeft: 5 }}>
+      <Link2 size={size} color={C.cyan} />
+    </span>
+  );
+}
+
 /*
  * Names compared for likeness, not equality: case, spacing, punctuation and
  * accents are dropped, and letters and digits of any script are kept, so a
@@ -2504,7 +2520,7 @@ function GroupsView({ t, update, nameOf, isAdmin, eventId }) {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {g.playerIds.map((id) => (
                   <Chip key={id} onClick={isAdmin ? () => setMoving(id) : undefined} active={moving === id}>
-                    {nameOf(id)}
+                    {nameOf(id)}<LinkMark t={t} id={id} />
                     {membersOf(t, id) && (
                       <span style={{ color: C.muted, fontSize: 11.5 }}> · {membersOf(t, id).join(", ")}</span>
                     )}
@@ -2756,7 +2772,7 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
                     return (
                       <tr key={r.id} onClick={() => onPlayer(r.id)} style={{ cursor: "pointer" }}>
                         <td style={{ ...td, textAlign: "center", color: q ? C.gold : C.muted, fontWeight: 800, width: 26 }}>{i + 1}</td>
-                        <td style={{ ...td, textAlign: "left", fontWeight: q ? 600 : 400, whiteSpace: "nowrap" }}>{nameOf(r.id)}</td>
+                        <td style={{ ...td, textAlign: "left", fontWeight: q ? 600 : 400, whiteSpace: "nowrap" }}>{nameOf(r.id)}<LinkMark t={t} id={r.id} /></td>
                         <td style={td}>{r.played}</td>
                         <td style={{ ...td, fontWeight: 700 }}>{r.wins}</td>
                         <td style={td}>{r.losses}</td>
@@ -3349,13 +3365,18 @@ function PlayersView({ t, nameOf, allMatches, onPlayer }) {
     <div>
       <SectionHead title={manyWord(t)} color={C.green}
         sub={`Every match a ${oneWord(t)} has played, group stage and knockout together. Tap for the full record.`} />
+      {t.players.some(isLinked) && (
+        <div style={{ fontSize: 12.5, color: C.muted, margin: "-6px 0 12px 15px", display: "flex", alignItems: "center", gap: 5 }}>
+          <Link2 size={13} color={C.cyan} />has a blader profile; the others were entered by name.
+        </div>
+      )}
       {rows.map(({ p, st }) => (
         <button key={p.id} onClick={() => onPlayer(p.id)} style={{
           width: "100%", display: "flex", alignItems: "center", gap: 12,
           background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
           padding: "13px", marginBottom: 6, cursor: "pointer", color: C.ink, textAlign: "left",
         }}>
-          <span style={{ flex: 1, fontSize: 15, fontWeight: 500 }}>{p.name}</span>
+          <span style={{ flex: 1, fontSize: 15, fontWeight: 500 }}>{p.name}<LinkMark t={t} id={p.id} /></span>
           <span style={{ fontSize: 13, color: C.muted }}>{st.played} played</span>
           <span className="bx-d" style={{ fontSize: 17, fontWeight: 800, minWidth: 46, textAlign: "right" }}>
             <span style={{ color: C.green }}>{st.wins}</span>
@@ -3790,11 +3811,22 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
         </button>
         <Blade color={col} h={26} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="bx-d" style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.05 }}>{nameOf(playerId)}</div>
+          <div className="bx-d" style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.05 }}>
+            {nameOf(playerId)}<LinkMark t={t} id={playerId} size={16} />
+          </div>
           {group && <div style={{ fontSize: 12, color: col }}>{group.name}</div>}
           {membersOf(t, playerId) && (
             <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>
-              {membersOf(t, playerId).join(" · ")}
+              {membersOf(t, playerId).map((m, i) => {
+                const pl = t.players.find((x) => x.id === playerId);
+                const linked = pl && pl.memberIds && pl.memberIds[i];
+                return (
+                  <Fragment key={i}>
+                    {i > 0 ? " · " : ""}{m}
+                    {linked && <Link2 size={11} color={C.cyan} style={{ marginLeft: 3, verticalAlign: "-1px" }} />}
+                  </Fragment>
+                );
+              })}
             </div>
           )}
         </div>
@@ -4119,7 +4151,7 @@ function FinalStandingsSheet({ t, onClose, update }) {
                 {rows.map((r) => (
                   <tr key={r.id}>
                     <td style={{ ...td, textAlign: "center", width: 28, fontWeight: 800, color: r.rank <= 3 ? C.gold : C.muted }}>{r.rank}</td>
-                    <td style={{ ...td, textAlign: "left", whiteSpace: "nowrap", fontWeight: r.rank <= 3 ? 600 : 400 }}>{r.name}</td>
+                    <td style={{ ...td, textAlign: "left", whiteSpace: "nowrap", fontWeight: r.rank <= 3 ? 600 : 400 }}>{r.name}<LinkMark t={t} id={r.id} /></td>
                     <td style={{ ...td, color: C.cyan, fontWeight: 800 }}>{Math.round(r.total * 100) / 100}</td>
                     <td style={td}>{r.played}</td>
                     <td style={td}>{r.wins}</td>
