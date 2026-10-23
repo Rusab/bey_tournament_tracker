@@ -998,19 +998,115 @@ function buildBracket(qualifiers, size, thirdPlace) {
       id: `k:0:${i}`, p1: p.p1 ? p.p1.id : null, p2: p.p2 ? p.p2.id : null,
       events: [], done: false,
     })),
+    ...roundsAfterFirst(size),
   ];
+  return propagate({ size, rounds, third: thirdPlaceMatch(size, thirdPlace), template: "standard" });
+}
+
+/** Every round after the first, empty, for a bracket of this size. */
+function roundsAfterFirst(size) {
+  const out = [];
   let n = size / 4, r = 1;
   while (n >= 1) {
-    rounds.push(Array.from({ length: n }, (_, i) => ({
+    out.push(Array.from({ length: n }, (_, i) => ({
       id: `k:${r}:${i}`, p1: null, p2: null, events: [], done: false,
     })));
     n = n / 2; r++;
   }
-  return propagate({
-    size, rounds,
-    third: thirdPlace && size >= 4
-      ? { id: "k:third", p1: null, p2: null, events: [], done: false } : null,
-  });
+  return out;
+}
+
+const thirdPlaceMatch = (size, thirdPlace) => (thirdPlace && size >= 4
+  ? { id: "k:third", p1: null, p2: null, events: [], done: false } : null);
+
+/*
+ * The Paired Groups template. Groups are paired - A with B and C with D
+ * unless chosen otherwise - and each pair plays the 1 v 3, 2 v 4 rule
+ * across itself:
+ *
+ *   M1 A1 v B3    M2 A2 v B4    M3 A3 v B1    M4 A4 v B2
+ *   M5 C1 v D3    M6 C2 v D4    M7 C3 v D1    M8 C4 v D2
+ *
+ * Each pair's matches are a block, and the next round crosses the blocks
+ * the same way, treating each block's matches as a group of their own:
+ * M1 v M7, M2 v M8, M3 v M5, M4 v M6. Later rounds keep the usual wiring.
+ *
+ * With two qualifiers a group it is the classic A1 v B2, A2 v B1, and it
+ * works for any even number of groups. It needs every qualifier to have a
+ * place, so it is only offered when the qualifiers fill the bracket exactly.
+ *
+ * `order` is the groups' ids in pairing order: the first two are a pair,
+ * then the next two, and so on.
+ */
+function pairedFits(groups, advance, koSize) {
+  const n = (groups || []).length;
+  return n >= 2 && n % 2 === 0 && advance >= 1 && n * advance === koSize;
+}
+
+/** A pairing order that names every group exactly once, or the groups as they are. */
+function pairingOrder(groups, wanted) {
+  const ids = groups.map((g) => g.id);
+  const ok = Array.isArray(wanted) && wanted.length === ids.length
+    && new Set(wanted).size === ids.length && wanted.every((id) => ids.includes(id));
+  return ok ? wanted : ids;
+}
+
+function buildPairedBracket(groups, groupMatches, advance, koSize, thirdPlace, nameOf, ties, order) {
+  const k = advance, off = Math.floor(k / 2);
+  const inOrder = pairingOrder(groups, order).map((id) => groups.find((g) => g.id === id));
+  const ranked = inOrder.map((g) =>
+    computeStandings(g.playerIds, groupMatches.filter((m) => m.groupId === g.id), nameOf, null, ties)
+      .slice(0, k).map((r) => r.id));
+
+  const first = [];
+  for (let gi = 0; gi + 1 < inOrder.length; gi += 2) {
+    const x = ranked[gi], y = ranked[gi + 1];
+    for (let j = 0; j < k; j++) first.push([x[j] || null, y[(j + off) % k] || null]);
+  }
+
+  const rounds = [
+    first.map(([p1, p2], i) => ({ id: `k:0:${i}`, p1, p2, events: [], done: false })),
+    ...roundsAfterFirst(koSize),
+  ];
+
+  // Cross the blocks into the next round, if there are blocks to cross.
+  const feeds = {};
+  const blocks = inOrder.length / 2;
+  if (rounds.length > 1 && blocks % 2 === 0) {
+    const f = [];
+    for (let b = 0; b < blocks; b += 2) {
+      for (let i = 0; i < k; i++) f.push([b * k + i, (b + 1) * k + ((i + off) % k)]);
+    }
+    if (validFeed(f, rounds[1].length)) feeds[1] = f;
+  }
+
+  return propagate({ size: koSize, rounds, third: thirdPlaceMatch(koSize, thirdPlace), feeds, template: "paired" });
+}
+
+/** "Group A" is A in a match line; any other name is kept whole. */
+const groupShort = (g) => String((g && g.name) || "").replace(/^Group\s+/i, "");
+
+/** The template's first round and next-round wiring, as lines to read before building. */
+function pairedPreview(groups, advance, order) {
+  const k = advance, off = Math.floor(k / 2);
+  const inOrder = pairingOrder(groups, order).map((id) => groups.find((g) => g.id === id));
+  const lines = [];
+  let m = 1;
+  for (let gi = 0; gi + 1 < inOrder.length; gi += 2) {
+    const a = groupShort(inOrder[gi]), b = groupShort(inOrder[gi + 1]);
+    const row = [];
+    for (let j = 0; j < k; j++) row.push(`M${m++} ${a}${j + 1} v ${b}${((j + off) % k) + 1}`);
+    lines.push(row.join("   "));
+  }
+  const blocks = inOrder.length / 2;
+  if (blocks % 2 === 0) {
+    const row = [];
+    for (let bb = 0; bb < blocks; bb += 2) {
+      for (let i = 0; i < k; i++) row.push(`M${bb * k + i + 1} v M${(bb + 1) * k + ((i + off) % k) + 1}`);
+    }
+    lines.push(`then ${row.join(", ")}`);
+  }
+  return lines;
 }
 
 /*
@@ -2680,10 +2776,32 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
     return d;
   });
 
+  const canPair = pairedFits(t.groups, t.advance, t.koSize);
+  const [template, setTemplate] = useState(
+    () => (t.bracketTemplate === "paired" && canPair ? "paired" : "standard"));
+  const [pairs, setPairs] = useState(() => pairingOrder(t.groups, t.groupPairs));
+
+  // Choosing a group for a place swaps it with wherever it was, so every group stays in exactly one pair.
+  const placeGroup = (i, gid) => setPairs((cur) => {
+    const next = [...cur];
+    const j = next.indexOf(gid);
+    if (j >= 0) next[j] = next[i];
+    next[i] = gid;
+    return next;
+  });
+
   const makeBracket = () => {
     update((d) => {
-      const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf, d.tieBreaks);
-      d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
+      const paired = template === "paired" && pairedFits(d.groups, d.advance, d.koSize);
+      if (paired) {
+        const order = pairingOrder(d.groups, pairs);
+        d.bracket = buildPairedBracket(d.groups, d.groupMatches, d.advance, d.koSize, d.thirdPlace, nameOf, d.tieBreaks, order);
+        d.groupPairs = order;
+      } else {
+        const quals = collectQualifiers(d.groups, d.groupMatches, d.advance, nameOf, d.tieBreaks);
+        d.bracket = buildBracket(quals, d.koSize, d.thirdPlace);
+      }
+      d.bracketTemplate = paired ? "paired" : "standard";
       return d;
     });
     setAsk(false);
@@ -2849,6 +2967,38 @@ function TableView({ t, nameOf, update, onPlayer, isAdmin, group, setGroup, onFi
               unsettled; without ${unsettled > 1 ? "them" : "it"} those places fall back to
               alphabetical order.`}
           </div>
+          {canPair && (
+            <div style={{ marginBottom: 13 }}>
+              <div className="bx-d" style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 7 }}>Template</div>
+              <Segmented value={template} onChange={setTemplate} tone={C.magenta} options={[
+                { value: "standard", label: "Standard seeding" },
+                { value: "paired", label: "Paired Groups" },
+              ]} />
+              {template === "paired" && t.groups.length > 2 && (
+                <div style={{ marginTop: 10 }}>
+                  {Array.from({ length: pairs.length / 2 }, (_, pi) => (
+                    <div key={pi} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      {[0, 1].map((side) => (
+                        <Fragment key={side}>
+                          {side === 1 && <span style={{ color: C.muted, fontSize: 13 }}>paired with</span>}
+                          <select style={{ ...inputStyle, padding: "8px 10px", fontSize: 14, flex: 1 }}
+                            value={pairs[pi * 2 + side]}
+                            onChange={(e) => placeGroup(pi * 2 + side, e.target.value)}>
+                            {t.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                          </select>
+                        </Fragment>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ fontSize: 12.5, color: C.muted, marginTop: 8, lineHeight: 1.55 }}>
+                {template === "standard"
+                  ? "Every qualifier seeded by group place and record, the field split down the middle."
+                  : pairedPreview(t.groups, t.advance, pairs).map((line, i) => <div key={i}>{line}</div>)}
+              </div>
+            </div>
+          )}
           <Btn onClick={() => (t.bracket ? setAsk(true) : makeBracket())}
             tone={allPlayed ? "primary" : "default"}>
             <GitBranch size={15} />{t.bracket ? "Rebuild bracket" : "Build bracket"}

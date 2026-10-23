@@ -35,7 +35,7 @@ function grab(name) {
 }
 
 const names = ["scoreOf", "winnerOf", "defaultFeed", "validFeed", "feedFor", "setRound",
-  "propagate", "bracketOrder", "seedOrder", "avoidSameGroup", "buildBracket"];
+  "propagate", "bracketOrder", "seedOrder", "avoidSameGroup", "roundsAfterFirst", "thirdPlaceMatch", "buildBracket"];
 const mod = await import(`data:text/javascript,${encodeURIComponent(
   names.map(grab).join("\n") + `\nexport { ${names.join(", ")} };`)}`);
 const { seedOrder, buildBracket, propagate, setRound, validFeed, feedFor } = mod;
