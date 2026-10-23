@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2,
+  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2, List, Network,
 } from "lucide-react";
 import { supabase, arrival } from "./lib/supabase.js";
 import {
@@ -1568,6 +1568,14 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
   const [scoring, setScoring] = useState(null);
   const [editRound, setEditRound] = useState(null);   // knockout round being set by hand
   const [blocked, setBlocked] = useState(null);       // a change refused: { what, ids, fromScore }
+  // List or tree, remembered on this device only: a viewer's preference.
+  const [bracketView, setBracketView] = useState(() => {
+    try { return localStorage.getItem(BRACKET_VIEW_KEY) === "tree" ? "tree" : "list"; } catch (e) { return "list"; }
+  });
+  const pickBracketView = (v) => {
+    setBracketView(v);
+    try { localStorage.setItem(BRACKET_VIEW_KEY, v); } catch (e) { /* private mode */ }
+  };
   const [detail, setDetail] = useState(null);
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
@@ -1863,7 +1871,9 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
       </header>
 
       <main style={{
-        padding: "18px 16px 96px", maxWidth: 720, margin: "0 auto",
+        padding: "18px 16px 96px", margin: "0 auto",
+        // A tree needs the room a reading column doesn't: a Round of 16 is four columns wide.
+        maxWidth: tab === "bracket" && bracketView === "tree" ? 1180 : 720,
         position: "relative", zIndex: 1, // above the fixed backdrop
         // The sliding content must never reach the page's scroll geometry:
         // a sideways overflow, even a clipped one, is enough to make the
@@ -1883,6 +1893,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
             eventId={eventId} isOwner={isOwner} meId={meId} />}
           {tab === "bracket" && <BracketView t={t} nameOf={nameOf} isAdmin={isAdmin}
             onScore={(id) => setScoring({ kind: "ko", id })}
+            view={bracketView} onView={pickBracketView}
             onEditRound={isAdmin ? setEditRound : null} />}
           {tab === "players" && <PlayersView t={t} nameOf={nameOf} allMatches={allMatches} onPlayer={setDetail} />}
         </div>
@@ -3243,7 +3254,9 @@ const td = {
 /*  Bracket                                                            */
 /* ================================================================== */
 
-function BracketView({ t, nameOf, onScore, isAdmin, onEditRound }) {
+const BRACKET_VIEW_KEY = "bx:bracketView";
+
+function BracketView({ t, nameOf, onScore, isAdmin, onEditRound, view, onView }) {
   if (t.koSize === 0) {
     return <EmptyState title="Group stage only" body="This tournament was set up without a knockout stage." />;
   }
@@ -3261,7 +3274,8 @@ function BracketView({ t, nameOf, onScore, isAdmin, onEditRound }) {
   return (
     <div>
       <SectionHead title="Knockout" color={C.gold}
-        sub={isAdmin ? "Winners move up automatically. Re-scoring a match re-opens everything after it." : "Live bracket."} />
+        sub={isAdmin ? "Winners move up automatically. Re-scoring a match re-opens everything after it." : "Live bracket."}
+        action={<ViewSwitch value={view} onChange={onView} />} />
 
       {champ && (
         <div style={{
@@ -3291,7 +3305,11 @@ function BracketView({ t, nameOf, onScore, isAdmin, onEditRound }) {
         </div>
       )}
 
-      {t.bracket.rounds.map((r, ri) => {
+      {view === "tree" && (
+        <BracketTree t={t} nameOf={nameOf} isAdmin={isAdmin} onScore={onScore} onEditRound={onEditRound} />
+      )}
+
+      {view === "list" && t.bracket.rounds.map((r, ri) => {
         const teams = r.length * 2;
         // A final fed by two semis has only one arrangement, so it has no editor.
         const editable = onEditRound && (ri === 0 || r.length >= 2);
@@ -3343,6 +3361,186 @@ function BracketView({ t, nameOf, onScore, isAdmin, onEditRound }) {
         </div>
       )}
     </div>
+  );
+}
+
+function ViewSwitch({ value, onChange }) {
+  const opt = (v, Icon, label) => {
+    const on = value === v;
+    return (
+      <button onClick={() => onChange(v)} aria-pressed={on} className="bx-d"
+        style={{
+          display: "flex", alignItems: "center", gap: 5, padding: "7px 10px", fontSize: 13.5, fontWeight: 700,
+          cursor: "pointer", border: "none", borderRadius: 2,
+          background: on ? C.gold : "transparent", color: on ? "#14020A" : C.muted,
+        }}>
+        <Icon size={14} />{label}
+      </button>
+    );
+  };
+  return (
+    <div role="group" aria-label="Bracket view" style={{
+      display: "flex", gap: 2, padding: 2, border: `1px solid ${C.line}`, borderRadius: 3, background: C.base,
+    }}>
+      {opt("list", List, "List")}
+      {opt("tree", Network, "Tree")}
+    </div>
+  );
+}
+
+/*
+ * The order to draw each round's matches in, so every match sits level with
+ * the two that feed it and no line crosses another. Worked back from the
+ * final through each round's feed, which is why a bracket set by hand or
+ * built from Paired Groups still draws as a clean tree: the two matches
+ * feeding display slot k always land in slots 2k and 2k+1.
+ */
+function treeOrder(bracket) {
+  const n = bracket.rounds.length;
+  const order = Array(n);
+  order[n - 1] = bracket.rounds[n - 1].map((_, i) => i);
+  for (let r = n - 1; r > 0; r--) {
+    const feed = feedFor(bracket, r);
+    order[r - 1] = order[r].flatMap((j) => feed[j]);
+  }
+  return order;
+}
+
+/** Where each qualifier finished in their group, as "A1", "B2" — for the opening round. */
+function seedTags(t, nameOf) {
+  const out = {};
+  if (!t.groups || !t.groups.length || isLeague(t)) return out;
+  collectQualifiers(t.groups, t.groupMatches, t.advance, nameOf, t.tieBreaks).forEach((q) => {
+    const short = groupShort(t.groups.find((g) => g.id === q.groupId));
+    out[q.id] = `${short.length <= 2 ? short : short.slice(0, 3)}${q.placement}`;
+  });
+  return out;
+}
+
+const TREE = { W: 172, GAP: 30, CELL: 86, H: 72, HEAD: 44 };
+
+function BracketTree({ t, nameOf, isAdmin, onScore, onEditRound }) {
+  const b = t.bracket;
+  const order = treeOrder(b);
+  const tags = seedTags(t, nameOf);
+  const { W, GAP, CELL, H, HEAD } = TREE;
+  const width = b.rounds.length * (W + GAP) - GAP;
+  const height = HEAD + b.rounds[0].length * CELL;
+  const x = (r) => r * (W + GAP);
+  const cy = (r, k) => HEAD + (k + 0.5) * CELL * 2 ** r;
+
+  // An elbow from each match to the one it feeds, gold once it has a winner.
+  const lines = [];
+  for (let r = 0; r + 1 < b.rounds.length; r++) {
+    order[r + 1].forEach((_, k) => {
+      [0, 1].forEach((side) => {
+        const src = b.rounds[r][order[r][2 * k + side]];
+        const x1 = x(r) + W, xm = x1 + GAP / 2, x2 = x(r + 1);
+        lines.push({ key: `${r}:${k}:${side}`, lit: !!(src && winnerOf(src)),
+          d: `M${x1} ${cy(r, 2 * k + side)} H${xm} V${cy(r + 1, k)} H${x2}` });
+      });
+    });
+  }
+  lines.sort((a, c) => a.lit - c.lit); // lit ones drawn last, on top
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      {/* On a phone it scrolls sideways; the board widens the page for it on a big screen. */}
+      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+        <div style={{ position: "relative", width, height, margin: "0 auto" }}>
+          <svg width={width} height={height} style={{ position: "absolute", inset: 0 }} aria-hidden="true">
+            {lines.map((l) => (
+              <path key={l.key} d={l.d} fill="none"
+                stroke={l.lit ? C.gold : C.line} strokeWidth={l.lit ? 2 : 1.5} />
+            ))}
+          </svg>
+          {b.rounds.map((r, ri) => {
+            const teams = r.length * 2;
+            const editable = onEditRound && (ri === 0 || r.length >= 2);
+            const feed = ri > 0 ? feedFor(b, ri) : null;
+            return (
+              <Fragment key={ri}>
+                <div style={{ position: "absolute", left: x(ri), top: 0, width: W, display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="bx-d" style={{ fontSize: 15, fontWeight: 700, color: C.gold, whiteSpace: "nowrap" }}>{roundName(teams)}</div>
+                    <div style={{ fontSize: 11.5, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {stageLine(t, stageKeyForTeams(teams))}
+                    </div>
+                  </div>
+                  {editable && (
+                    <button onClick={() => onEditRound(ri)} aria-label={`Edit ${roundName(teams)} matchups`}
+                      style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 3, color: C.muted, cursor: "pointer", display: "flex", padding: 5 }}>
+                      <Pencil size={12} />
+                    </button>
+                  )}
+                </div>
+                {order[ri].map((mi, k) => (
+                  <div key={r[mi].id} style={{ position: "absolute", left: x(ri), top: cy(ri, k) - H / 2, width: W, height: H }}>
+                    <TreeCard m={r[mi]} label={`M${mi + 1}`} nameOf={nameOf} locked={!isAdmin}
+                      tags={ri === 0 ? tags : null} bye={ri === 0}
+                      pending={feed ? [`Winner M${feed[mi][0] + 1}`, `Winner M${feed[mi][1] + 1}`] : null}
+                      onClick={() => onScore(r[mi].id)} />
+                  </div>
+                ))}
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+      {Object.keys(tags).length > 0 && (
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
+          A1 is the winner of Group A, B2 the runner-up of Group B, and so on.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One match in the tree: two lines, the winner lit, tappable to score. */
+function TreeCard({ m, label, nameOf, locked, tags, bye, pending, onClick }) {
+  const w = winnerOf(m);
+  const both = m.p1 && m.p2 && !locked;
+  const played = m.done && m.p1 && m.p2;
+  const sets = played && m.sets && m.sets.length ? setWins(m) : null;
+  const { s1, s2 } = scoreOf(m);
+  const line = (id, side) => {
+    const other = side === 1 ? m.p2 : m.p1;
+    const text = id ? nameOf(id) : (bye && other ? "Bye" : (pending ? pending[side - 1] : "TBD"));
+    const won = id && w === id;
+    const col = side === 1 ? C.magenta : C.cyan;
+    const tag = id && tags ? tags[id] : null;
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, height: 24 }}>
+        {tags && (
+          <span className="bx-d" style={{
+            fontSize: 11, fontWeight: 700, width: 26, flexShrink: 0, textAlign: "center",
+            color: tag ? C.gold : C.line, border: `1px solid ${tag ? C.gold + "55" : C.line}`, borderRadius: 2, padding: "1px 0",
+          }}>{tag || "–"}</span>
+        )}
+        <span style={{
+          flex: 1, minWidth: 0, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          fontWeight: won ? 700 : 400,
+          color: !id ? C.muted : won ? col : played ? C.muted : C.ink,
+        }}>{text}</span>
+        {played && (
+          <span className="bx-d" style={{ fontSize: 14, fontWeight: 800, color: won ? col : C.muted, flexShrink: 0 }}>
+            {sets ? (side === 1 ? sets.w1 : sets.w2) : (side === 1 ? s1 : s2)}
+          </span>
+        )}
+      </div>
+    );
+  };
+  return (
+    <button onClick={both ? onClick : undefined} disabled={!both} style={{
+      width: "100%", height: "100%", display: "block", textAlign: "left", color: C.ink,
+      background: C.surface, border: `1px solid ${w ? C.gold + "66" : C.line}`,
+      borderLeft: `3px solid ${m.done && m.p1 && m.p2 ? C.green : C.raised}`,
+      borderRadius: 3, padding: "3px 8px", cursor: both ? "pointer" : "default",
+    }}>
+      <div className="bx-d" style={{ fontSize: 10.5, color: C.muted, lineHeight: 1.2 }}>{label}</div>
+      {line(m.p1, 1)}
+      {line(m.p2, 2)}
+    </button>
   );
 }
 

@@ -32,10 +32,10 @@ function grab(name) {
 
 const names = ["num", "scoreOf", "winnerOf", "tieKey", "tieWinner", "tieOrder", "computeStandings",
   "defaultFeed", "validFeed", "feedFor", "propagate", "roundsAfterFirst", "thirdPlaceMatch",
-  "pairedFits", "pairingOrder", "buildPairedBracket", "groupShort", "pairedPreview"];
+  "pairedFits", "pairingOrder", "buildPairedBracket", "groupShort", "pairedPreview", "treeOrder"];
 const mod = await import(`data:text/javascript,${encodeURIComponent(
   names.map(grab).join("\n") + `\nexport { ${names.join(", ")} };`)}`);
-const { pairedFits, pairingOrder, buildPairedBracket, pairedPreview, propagate, feedFor } = mod;
+const { pairedFits, pairingOrder, buildPairedBracket, pairedPreview, propagate, feedFor, treeOrder } = mod;
 
 let fails = 0;
 const check = (label, got, want) => {
@@ -124,6 +124,25 @@ const winAll = (b, r) => {
   check("eight groups of two pair off in fours",
     first(b).slice(0, 4), [["A1", "B2"], ["A2", "B1"], ["C1", "D2"], ["C2", "D1"]]);
   check("and cross block with block", feedFor(b, 1), [[0, 3], [1, 2], [4, 7], [5, 6]]);
+}
+
+/* ---- the tree view draws every match level with the two that feed it ---- */
+const drawsClean = (b) => {
+  const order = treeOrder(b);
+  return b.rounds.every((r, ri) =>
+    [...order[ri]].sort((x, y) => x - y).join() === r.map((_, i) => i).join()
+    && (ri === 0 || order[ri].every((j, k) =>
+      JSON.stringify(feedFor(b, ri)[j]) === JSON.stringify([order[ri - 1][2 * k], order[ri - 1][2 * k + 1]]))));
+};
+{
+  const { groups, groupMatches } = setUp(["A", "B", "C", "D"], 4);
+  const b = buildPairedBracket(groups, groupMatches, 4, 16, false, nameOf, null);
+  check("the crossed round of 16 is drawn M1, M7, M3, M5, M2, M8, M4, M6", treeOrder(b)[0], [0, 6, 2, 4, 1, 7, 3, 5]);
+  check("so no line crosses another", drawsClean(b), true);
+  const plain = buildPairedBracket(...Object.values(setUp(["A", "B"], 4)), 4, 8, true, nameOf, null);
+  check("an uncrossed bracket follows the usual M1 v M3, M2 v M4 wiring", treeOrder(plain)[0], [0, 2, 1, 3]);
+  check("and a hand-set feed still draws clean",
+    drawsClean({ ...plain, feeds: { 1: [[0, 3], [2, 1]] } }), true);
 }
 
 /* ---- when it is offered ---- */
