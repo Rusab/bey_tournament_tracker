@@ -9,6 +9,10 @@
 --  data is left exactly as it was. Safe to re-run.
 --
 --  Run medals-schema.sql first, then the whole of this file.
+--
+--  Once medal-claims-schema.sql has run, every new medal needs a
+--  category, so "medal giver adds a medal" here fails by design. Use
+--  medal-claims-permission-tests.sql from then on.
 -- =====================================================================
 
 drop table if exists medal_results;

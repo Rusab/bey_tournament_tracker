@@ -441,11 +441,15 @@ export async function seriesRequests() {
  */
 
 const MEDAL_COLS = "id, blader_id, place, tournament_name, organiser_name, season, teammate_id, awarded_by, created_at";
+// Categories came later; a database without that script reads the medals without them.
+const MEDAL_COLS_NOW = MEDAL_COLS + ", category";
 
 export async function listMedals(bladerId) {
-  const { data, error } = await supabase
-    .from("medals").select(MEDAL_COLS).eq("blader_id", bladerId)
+  const ask = (cols) => supabase
+    .from("medals").select(cols).eq("blader_id", bladerId)
     .order("created_at", { ascending: false });
+  let { data, error } = await ask(MEDAL_COLS_NOW);
+  if (error) ({ data, error } = await ask(MEDAL_COLS));
   if (error) { console.error(error); return null; }
   return data || [];
 }
@@ -461,8 +465,8 @@ export async function amAwarder() {
  * One row per blader. A tag team medal goes to both members in the same
  * statement, so either both get it or neither does, each naming the other.
  */
-export async function addMedal({ bladerId, teammateId, place, tournamentName, organiserName, season }) {
-  const base = { place, tournament_name: tournamentName, organiser_name: organiserName, season };
+export async function addMedal({ bladerId, teammateId, place, category, tournamentName, organiserName, season }) {
+  const base = { place, category, tournament_name: tournamentName, organiser_name: organiserName, season };
   const rows = [{ ...base, blader_id: bladerId, teammate_id: teammateId || null }];
   if (teammateId) rows.push({ ...base, blader_id: teammateId, teammate_id: bladerId });
   const { error } = await supabase.from("medals").insert(rows);
@@ -474,6 +478,115 @@ export async function removeMedal(id) {
   if (error) return { error };
   if (!data || !data.length) return { error: new Error("That medal could not be removed.") };
   return {};
+}
+
+/* ------------------------------------------------- medals sent for approval */
+
+/*
+ * Any blader can send a medal in, with a photo of each side as proof. It
+ * waits, seen only by them and the medal approver, until it is approved -
+ * which writes the real medal - or turned down. Either way the photos are
+ * deleted. The photos are private: they are shown through links that
+ * expire, never a public address.
+ */
+
+const PROOFS = "medal-proofs";
+export const CLAIM_LIMIT = 5;
+const CLAIM_COLS = "id, blader_id, place, category, tournament_name, organiser_name, season, teammate_id, front_path, back_path, created_at";
+
+/** This blader's medals waiting for approval. Null if they could not be loaded. */
+export async function myMedalClaims(userId) {
+  const { data, error } = await supabase
+    .from("medal_claims").select(CLAIM_COLS).eq("blader_id", userId)
+    .order("created_at", { ascending: false });
+  if (error) return null;
+  return data || [];
+}
+
+/** Everything waiting, oldest first. Only the approver gets anything back. */
+export async function medalClaimsWaiting() {
+  const { data, error } = await supabase
+    .from("medal_claims").select(CLAIM_COLS).order("created_at", { ascending: true });
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+export async function medalClaimCount() {
+  const { count, error } = await supabase
+    .from("medal_claims").select("id", { count: "exact", head: true });
+  return error ? 0 : count || 0;
+}
+
+async function uploadProof(userId, blob, side) {
+  const ext = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" }[blob.type] || "bin";
+  const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${side}.${ext}`;
+  const { error } = await supabase.storage.from(PROOFS).upload(path, blob, { contentType: blob.type });
+  if (error) throw error;
+  return path;
+}
+
+/**
+ * Deletes photos whose claim is settled, then clears them off the list.
+ * The list only lets go of a photo once its file is really gone, so
+ * anything that fails here is tried again next time.
+ */
+async function dropProofs(paths) {
+  if (!paths || !paths.length) return;
+  const { error } = await supabase.storage.from(PROOFS).remove(paths);
+  if (error) { console.error(error); return; }
+  await supabase.rpc("clear_proof_trash", { p_paths: paths });
+}
+
+/** Photos left over from an earlier delete that did not finish. */
+export async function sweepProofs() {
+  const { data, error } = await supabase.rpc("proof_trash");
+  if (!error && data && data.length) await dropProofs(data);
+}
+
+export async function submitMedalClaim(userId, c, front, back) {
+  const up = [];
+  try {
+    up.push(await uploadProof(userId, front, "front"));
+    up.push(await uploadProof(userId, back, "back"));
+  } catch (err) {
+    if (up.length) await supabase.storage.from(PROOFS).remove(up);
+    return { error: new Error("The photos could not be uploaded. Try again.") };
+  }
+  const { error } = await supabase.rpc("submit_medal_claim", {
+    p_place: c.place, p_category: c.category, p_tournament: c.tournamentName,
+    p_organiser: c.organiserName, p_season: c.season, p_teammate: c.teammateId || null,
+    p_front: up[0], p_back: up[1],
+  });
+  if (error) {
+    await supabase.storage.from(PROOFS).remove(up);   // sent for nothing
+    return { error };
+  }
+  return {};
+}
+
+export async function withdrawMedalClaim(id) {
+  const { data, error } = await supabase.rpc("withdraw_medal_claim", { p_id: id });
+  if (error) return { error };
+  await dropProofs(data);
+  return {};
+}
+
+/** The approver's decision. The photos go either way. */
+export async function reviewMedalClaim(id, approve) {
+  const { data, error } = await supabase.rpc("review_medal_claim", { p_id: id, p_approve: approve });
+  if (error) return { error };
+  await dropProofs(data);
+  return {};
+}
+
+/** Links to the private photos, good for ten minutes. */
+export async function proofLinks(paths) {
+  if (!paths.length) return {};
+  const { data, error } = await supabase.storage.from(PROOFS).createSignedUrls(paths, 600);
+  if (error || !data) return {};
+  const out = {};
+  data.forEach((d) => { if (d.signedUrl) out[d.path] = d.signedUrl; });
+  return out;
 }
 
 /* -------------------------------------------------------------------- staff */

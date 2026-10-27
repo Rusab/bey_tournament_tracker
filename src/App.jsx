@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
-  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2, List, Network,
+  Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2, List, Network, Clock, Send,
 } from "lucide-react";
 import { supabase, arrival } from "./lib/supabase.js";
 import {
@@ -22,6 +22,8 @@ import {
   findBlader, bladerEvents, bladerDirectory,
   seriesOfEvents, loadSeries, seriesEvents, everyEvent, startSeries, linkToSeries,
   removeFromSeries, deleteSeries, seriesRequests,
+  CLAIM_LIMIT, myMedalClaims, medalClaimsWaiting, medalClaimCount, submitMedalClaim,
+  withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
 import { renderRankingImage } from "./rankingImage.js";
@@ -272,6 +274,8 @@ const IMAGE_KINDS = {
   logo: { maxDim: 320, quality: 0.9, alpha: true, prefix: "logo" },
   // Shown at most ~120px across, usually 36; a little headroom for sharp screens.
   avatar: { maxDim: 400, quality: 0.8, alpha: false, prefix: "avatar" },
+  // A medal photo has to show the medal clearly enough to check it.
+  proof: { maxDim: 1600, quality: 0.82, alpha: false, prefix: "proof" },
 };
 
 const EXT = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" };
@@ -6126,7 +6130,7 @@ function BladersSheet({ onOpen, onClose }) {
  * One blader's profile. The real name row appears only when the database
  * hands one back, which it does for the blader, organisers and staff.
  */
-function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, onOpenEvent }) {
+function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, onClaim, onOpenEvent }) {
   const [b, setB] = useState(undefined);
   const [tab, setTab] = useState("medals");
   const [real, setReal] = useState(null);
@@ -6134,16 +6138,21 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
   const [names, setNames] = useState({});        // teammates, by id
   const [dropping, setDropping] = useState(null); // the medal being removed
   const [err, setErr] = useState(null);
+  const [claims, setClaims] = useState(null);     // your own medals waiting for approval
+  const [withdrawing, setWithdrawing] = useState(null);
 
   const loadMedals = () => listMedals(id).then(async (rows) => {
     setMedals(rows);
     if (rows) setNames(await bladerNames(rows.map((m) => m.teammate_id)));
   });
 
+  const loadClaims = () => myMedalClaims(id).then(setClaims);
+
   useEffect(() => {
     loadBlader(id).then(setB);
     if (meId) bladerRealName(id).then(setReal);
     loadMedals();
+    if (meId && meId === id) loadClaims();
   }, [id, meId]);
 
   // Taken back by whoever gave it, or by staff — the same rule the database applies.
@@ -6191,8 +6200,11 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
               {mine && (
                 <Btn onClick={onEdit} tone="primary"><Pencil size={15} />Edit profile</Btn>
               )}
-              {canAward && (
+              {/* The approver gives medals directly; everyone else sends theirs in. */}
+              {canAward ? (
                 <Btn onClick={() => onAward(b)}><Medal size={15} />Add medal</Btn>
+              ) : mine && onClaim && claims !== null && (
+                <Btn onClick={() => onClaim(b, claims.length)}><Medal size={15} />Add medal</Btn>
               )}
             </div>
           )}
@@ -6211,7 +6223,12 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
               ) : medals === null ? (
                 <div style={{ color: C.muted, fontSize: 14 }}>Medals could not be loaded.</div>
               ) : (
-                <MedalBoard medals={medals} names={names} canRemove={canRemove} onRemove={setDropping} />
+                <>
+                  {mine && claims && claims.length > 0 && (
+                    <WaitingMedals claims={claims} onWithdraw={setWithdrawing} />
+                  )}
+                  <MedalBoard medals={medals} names={names} canRemove={canRemove} onRemove={setDropping} />
+                </>
               )}
               {err && <div style={{ color: C.magenta, fontSize: 13.5, marginTop: 10 }}>{err}</div>}
             </div>
@@ -6221,6 +6238,21 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
         </>
       )}
 
+      {withdrawing && (
+        <Confirm
+          title="Withdraw this medal?"
+          body={`${PLACE_LABEL[withdrawing.place]} at ${withdrawing.tournament_name} stops waiting for approval, and its photos are deleted. You can send it in again later.`}
+          confirmLabel="Withdraw" tone="danger"
+          onConfirm={async () => {
+            const c = withdrawing;
+            setWithdrawing(null); setErr(null);
+            const { error } = await withdrawMedalClaim(c.id);
+            if (error) setErr(error.message);
+            loadClaims();
+          }}
+          onClose={() => setWithdrawing(null)}
+        />
+      )}
       {dropping && (
         <Confirm
           title="Remove this medal?"
@@ -6378,6 +6410,70 @@ function Participation({ id, onOpenEvent }) {
   );
 }
 
+/*
+ * What kind of tournament a medal came from. Only the first two can be
+ * chosen for now; the rest are shown, marked coming soon, so the ladder is
+ * visible. Opening one later means flipping `open` here and adding it to
+ * medal_category_open() in the database.
+ */
+const MEDAL_CATEGORIES = [
+  { key: "unranked_local", label: "Unranked Locals", open: true },
+  { key: "ranked_local", label: "Ranked Locals", open: true },
+  { key: "league", label: "League" },
+  { key: "s1", label: "S1" },
+  { key: "g3", label: "G3" },
+  { key: "g2", label: "G2" },
+  { key: "g1", label: "G1" },
+  { key: "gp", label: "GP" },
+];
+const categoryLabel = (k) => (MEDAL_CATEGORIES.find((c) => c.key === k) || {}).label || "No category";
+const MEDAL_RULE_SEND = "Only pre-announced tournaments and pre-announced podiums are acceptable.";
+const MEDAL_RULE_SHOW = "Only pre-announced podiums are displayed.";
+
+function MedalRule({ text, style }) {
+  return (
+    <div style={{
+      display: "flex", gap: 7, alignItems: "flex-start", fontSize: 12.5, color: C.gold, lineHeight: 1.45,
+      ...style,
+    }}>
+      <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />{text}
+    </div>
+  );
+}
+
+function CategoryPicker({ value, onChange }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 }}>
+      {MEDAL_CATEGORIES.map((c) => {
+        const on = value === c.key;
+        return (
+          <button key={c.key} onClick={() => c.open && onChange(c.key)} disabled={!c.open}
+            aria-pressed={on} className="bx-d"
+            style={{
+              padding: "9px 8px", borderRadius: 3, textAlign: "center",
+              fontSize: 14, fontWeight: 700, cursor: c.open ? "pointer" : "not-allowed",
+              background: on ? C.gold : C.base, color: on ? "#14020A" : c.open ? C.ink : C.muted,
+              border: `1px solid ${on ? C.gold : C.line}`, opacity: c.open ? 1 : 0.55,
+            }}>
+            {c.label}
+            {!c.open && <div style={{ fontSize: 10.5, fontWeight: 500, marginTop: 1 }}>Coming soon</div>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CategoryTag({ category }) {
+  if (!category) return null;
+  return (
+    <span style={{
+      fontSize: 11, color: C.gold, border: `1px solid ${C.gold}55`, borderRadius: 3,
+      padding: "1px 6px", whiteSpace: "nowrap",
+    }}>{categoryLabel(category)}</span>
+  );
+}
+
 const PLACES = ["first", "second", "third", "swiss"];
 const PLACE_LABEL = { first: "1st Place", second: "2nd Place", third: "3rd Place", swiss: "Swiss Medal" };
 const PLACE_COLOR = { first: C.gold, second: "#C9CED6", third: "#C87941", swiss: C.cyan };
@@ -6399,12 +6495,26 @@ const seasonOrder = (a, b) => {
  * and opens to the tournaments behind the number. With no medals at all the
  * S1 list still shows, at zero, so the shape of the record is always there.
  */
-function MedalBoard({ medals, names, canRemove, onRemove }) {
+function MedalBoard({ medals: every, names, canRemove, onRemove }) {
   const [open, setOpen] = useState(null);   // "season|place"
+  const [cat, setCat] = useState("all");
+  const kinds = MEDAL_CATEGORIES.map((c) => c.key).filter((k) => every.some((m) => m.category === k));
+  if (every.some((m) => !m.category)) kinds.push("none");
+  const medals = cat === "all" ? every : every.filter((m) => (m.category || "none") === cat);
   const seasons = [...new Set(medals.map((m) => m.season))].sort(seasonOrder);
   if (!seasons.length) seasons.push("S1");
 
-  return seasons.map((season) => {
+  return (
+    <>
+      {kinds.length > 1 && (
+        <div style={{ marginBottom: 14 }}>
+          <Segmented value={cat} onChange={(v) => { setCat(v); setOpen(null); }} tone={C.gold} options={[
+            { value: "all", label: "All" },
+            ...kinds.map((k) => ({ value: k, label: k === "none" ? "Other" : categoryLabel(k) })),
+          ]} />
+        </div>
+      )}
+      {seasons.map((season) => {
     const here = medals.filter((m) => m.season === season);
     return (
       <div key={season} style={{ marginBottom: 20 }}>
@@ -6448,7 +6558,9 @@ function MedalBoard({ medals, names, canRemove, onRemove }) {
                       borderBottom: `1px solid ${C.line}33`,
                     }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14.5 }}>{m.tournament_name}</div>
+                        <div style={{ fontSize: 14.5, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                          {m.tournament_name}<CategoryTag category={m.category} />
+                        </div>
                         <div style={{ fontSize: 12, color: C.muted }}>
                           {m.organiser_name}
                           {m.teammate_id && names[m.teammate_id] ? ` · with ${names[m.teammate_id]}` : ""}
@@ -6469,7 +6581,81 @@ function MedalBoard({ medals, names, canRemove, onRemove }) {
         })}
       </div>
     );
-  });
+      })}
+      <MedalRule text={MEDAL_RULE_SHOW} style={{ color: C.muted }} />
+    </>
+  );
+}
+
+/** Only on your own profile: medals you sent in that are not decided yet. */
+function WaitingMedals({ claims, onWithdraw }) {
+  return (
+    <div style={{ ...card, borderColor: `${C.gold}66`, marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Clock size={16} color={C.gold} />
+        <div className="bx-d" style={{ fontSize: 16, fontWeight: 700 }}>Waiting for approval</div>
+        <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.muted }}>{claims.length} of {CLAIM_LIMIT}</span>
+      </div>
+      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 8 }}>
+        Only you can see these. They join your medals once approved.
+      </div>
+      {claims.map((c) => (
+        <div key={c.id} style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${C.line}44`,
+        }}>
+          <Medal size={16} color={PLACE_COLOR[c.place]} style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+              {PLACE_LABEL[c.place]} · {c.tournament_name}<CategoryTag category={c.category} />
+            </div>
+            <div style={{ fontSize: 12, color: C.muted }}>{c.organiser_name} · {c.season}</div>
+          </div>
+          <button onClick={() => onWithdraw(c)} aria-label="Withdraw"
+            style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 4 }}>
+            <Trash2 size={15} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** One side of the medal, photographed. Shrunk before anything is uploaded. */
+function ProofPicker({ label, blob, onPick, onError }) {
+  const url = useMemo(() => (blob ? URL.createObjectURL(blob) : null), [blob]);
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  const pick = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const out = await shrinkImage(file, "proof");
+      if (!out) throw new Error();
+      onPick(out);
+    } catch {
+      onError("That photo could not be read. Try a JPEG or PNG.");
+    }
+  };
+  return (
+    <label style={{
+      flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      gap: 6, cursor: "pointer", aspectRatio: "1 / 1", borderRadius: 3, overflow: "hidden", position: "relative",
+      border: `1px dashed ${blob ? C.green : C.line}`, background: C.base, color: C.muted, fontSize: 13,
+    }}>
+      {url ? (
+        <>
+          <img src={url} alt={label} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+          <span style={{
+            position: "absolute", left: 0, right: 0, bottom: 0, padding: "5px 6px", textAlign: "center",
+            background: "#0B0718CC", color: C.ink, fontSize: 12.5,
+          }}>{label} · tap to change</span>
+        </>
+      ) : (
+        <><Camera size={22} /><span>{label}</span></>
+      )}
+      <input type="file" accept="image/*" onChange={pick} style={{ display: "none" }} />
+    </label>
+  );
 }
 
 /**
@@ -6477,8 +6663,12 @@ function MedalBoard({ medals, names, canRemove, onRemove }) {
  * as suggestions, and picking a known tournament fills in who ran it; any
  * other name can still be typed, for events that were never run here.
  */
-function MedalSheet({ blader, directory, onClose, onSaved }) {
+function MedalSheet({ blader, directory, onClose, onSaved, claim = false, waiting = 0 }) {
   const [place, setPlace] = useState("first");
+  const [category, setCategory] = useState(null);
+  const [front, setFront] = useState(null);
+  const [back, setBack] = useState(null);
+  const full = claim && waiting >= CLAIM_LIMIT;
   const [tournament, setTournament] = useState("");
   const [organiser, setOrganiser] = useState("");
   const [season, setSeason] = useState("S1");
@@ -6502,28 +6692,50 @@ function MedalSheet({ blader, directory, onClose, onSaved }) {
 
   const save = async () => {
     const t = tournament.trim(), o = organiser.trim(), s = season.trim();
-    const bad = !t ? "Which tournament was it?"
+    const bad = !category ? "Which kind of tournament was it? Choose a category."
+      : !t ? "Which tournament was it?"
       : t.length > 80 ? "Keep the tournament name to 80 characters."
       : !o ? "Who organised it?"
       : o.length > 60 ? "Keep the organiser to 60 characters."
       : !s ? "Which season?"
       : s.length > 20 ? "Keep the season to 20 characters."
+      : claim && (!front || !back) ? "Add a photo of each side of the medal."
       : null;
     if (bad) { setMsg(bad); return; }
     setBusy(true); setMsg(null);
-    const { error } = await addMedal({
+    const fields = {
       bladerId: blader.id, teammateId: teammate || null,
-      place, tournamentName: t, organiserName: o, season: s,
-    });
+      place, category, tournamentName: t, organiserName: o, season: s,
+    };
+    const { error } = claim
+      ? await submitMedalClaim(blader.id, fields, front, back)
+      : await addMedal(fields);
     if (error) { setBusy(false); setMsg(error.message || "That medal could not be saved."); return; }
     onSaved();
   };
 
   return (
-    <SheetFrame title="Add medal" onClose={onClose}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+    <SheetFrame title={claim ? "Send a medal in" : "Add medal"} onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <Avatar path={blader.photo_path} name={blader.blader_name} size={44} />
         <div className="bx-d" style={{ fontSize: 20, fontWeight: 800 }}>{blader.blader_name}</div>
+      </div>
+
+      <MedalRule text={MEDAL_RULE_SEND} style={{
+        marginBottom: 18, padding: "9px 11px", border: `1px solid ${C.gold}55`, borderRadius: 3, background: `${C.gold}12`,
+      }} />
+
+      {claim && (
+        <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 18, maxWidth: "58ch" }}>
+          It goes to the medal approver with your photos, and shows on your profile once
+          approved. The photos are deleted as soon as it is decided. You can have up to {CLAIM_LIMIT} waiting
+          at once — {waiting} {waiting === 1 ? "is" : "are"} waiting now.
+        </div>
+      )}
+
+      <div style={{ marginBottom: 18 }}>
+        <div className="bx-d" style={{ fontSize: 15, marginBottom: 7, fontWeight: 600 }}>Category</div>
+        <CategoryPicker value={category} onChange={setCategory} />
       </div>
 
       <div style={{ marginBottom: 18 }}>
@@ -6545,18 +6757,42 @@ function MedalSheet({ blader, directory, onClose, onSaved }) {
       <Field label="Season">
         <input style={inputStyle} maxLength={20} value={season} onChange={(e) => setSeason(e.target.value)} />
       </Field>
-      <Field label="Also award to teammate" hint="Tag team only. Their partner gets the same medal on their own profile.">
+      <Field label={claim ? "Teammate" : "Also award to teammate"}
+        hint={claim
+          ? "Tag team only. Once approved, your partner gets the same medal on their own profile."
+          : "Tag team only. Their partner gets the same medal on their own profile."}>
         <select style={inputStyle} value={teammate} onChange={(e) => setTeammate(e.target.value)}>
           <option value="">— nobody, singles —</option>
           {others.map((r) => <option key={r.id} value={r.id}>{r.blader_name}</option>)}
         </select>
       </Field>
 
+      {claim && (
+        <div style={{ marginBottom: 18 }}>
+          <div className="bx-d" style={{ fontSize: 15, marginBottom: 7, fontWeight: 600 }}>Proof</div>
+          <div style={{ display: "flex", gap: 8, maxWidth: 420 }}>
+            <ProofPicker label="Front of the medal" blob={front} onPick={(x) => { setFront(x); setMsg(null); }} onError={setMsg} />
+            <ProofPicker label="Back of the medal" blob={back} onPick={(x) => { setBack(x); setMsg(null); }} onError={setMsg} />
+          </div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6, lineHeight: 1.45 }}>
+            A clear photo of each side. Only you and the medal approver can see them.
+          </div>
+        </div>
+      )}
+
+      {full && (
+        <div style={{ color: C.gold, fontSize: 13.5, marginBottom: 12, lineHeight: 1.5 }}>
+          You have {CLAIM_LIMIT} medals waiting for approval. Send more once those are decided.
+        </div>
+      )}
       {msg && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12, lineHeight: 1.5 }}>{msg}</div>}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <Btn onClick={save} tone="primary" disabled={busy}>
-          <Medal size={15} />{busy ? "Saving…" : teammate ? "Award to both" : "Award medal"}
+        <Btn onClick={save} tone="primary" disabled={busy || full}>
+          {claim ? <Send size={15} /> : <Medal size={15} />}
+          {busy ? (claim ? "Sending…" : "Saving…")
+            : claim ? "Send for approval"
+            : teammate ? "Award to both" : "Award medal"}
         </Btn>
         <Btn onClick={onClose} tone="ghost" disabled={busy}>Cancel</Btn>
       </div>
@@ -6694,13 +6930,36 @@ function ProfileEditSheet({ meId, blader, onClose, onSaved }) {
   );
 }
 
-function ApprovalsSheet({ onClose }) {
-  const [rows, setRows] = useState(null);
-  const refresh = () => pendingHosts().then(setRows);
-  useEffect(() => { refresh(); }, []);
+function ApprovalsSheet({ isStaff, isAwarder, onClose }) {
+  const [tab, setTab] = useState(isStaff ? "hosting" : "medals");
+  const [hosts, setHosts] = useState(null);
+  const [claims, setClaims] = useState(null);
+  useEffect(() => {
+    if (isStaff) pendingHosts().then(setHosts);
+    if (isAwarder) medalClaimsWaiting().then((r) => setClaims(r || "error"));
+  }, [isStaff, isAwarder]);
+  const count = (x) => (Array.isArray(x) ? ` (${x.length})` : "");
 
   return (
-    <SheetFrame title="Waiting to host" onClose={onClose}>
+    <SheetFrame title="Approvals" onClose={onClose}>
+      {isStaff && isAwarder && (
+        <div style={{ marginBottom: 18 }}>
+          <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
+            { value: "hosting", label: `Hosting${count(hosts)}` },
+            { value: "medals", label: `Medals${count(claims)}` },
+          ]} />
+        </div>
+      )}
+      {tab === "hosting" && isStaff
+        ? <HostApprovals rows={hosts} refresh={() => pendingHosts().then(setHosts)} />
+        : <MedalApprovals rows={claims} refresh={() => medalClaimsWaiting().then((r) => setClaims(r || "error"))} />}
+    </SheetFrame>
+  );
+}
+
+function HostApprovals({ rows, refresh }) {
+  return (
+    <>
       <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 18, maxWidth: "58ch" }}>
         Approving lets someone create their own tournaments. It gives them no access to yours.
       </div>
@@ -6720,7 +6979,106 @@ function ApprovalsSheet({ onClose }) {
           </Btn>
         </div>
       ))}
-    </SheetFrame>
+    </>
+  );
+}
+
+/**
+ * Medals sent in, oldest first, each with its two photos. Approving writes
+ * the medal to the profile; turning it down drops it. Either way the claim
+ * and its photos are deleted.
+ */
+function MedalApprovals({ rows, refresh }) {
+  const [names, setNames] = useState({});
+  const [links, setLinks] = useState({});
+  const [busy, setBusy] = useState(null);       // the claim being decided
+  const [refusing, setRefusing] = useState(null);
+  const [err, setErr] = useState(null);
+
+  // Photos left over from a delete that did not finish get another go.
+  useEffect(() => { sweepProofs(); }, []);
+  useEffect(() => {
+    if (!Array.isArray(rows) || !rows.length) return;
+    bladerNames(rows.flatMap((r) => [r.blader_id, r.teammate_id])).then(setNames);
+    proofLinks(rows.flatMap((r) => [r.front_path, r.back_path])).then(setLinks);
+  }, [rows]);
+
+  const decide = async (c, approve) => {
+    setBusy(c.id); setErr(null);
+    const { error } = await reviewMedalClaim(c.id, approve);
+    setBusy(null);
+    if (error) setErr(error.message || "That could not be saved.");
+    refresh();
+  };
+
+  const photo = (path, label) => (
+    <a href={links[path]} target="_blank" rel="noreferrer" style={{
+      flex: 1, minWidth: 0, aspectRatio: "1 / 1", borderRadius: 3, overflow: "hidden", position: "relative",
+      border: `1px solid ${C.line}`, background: C.base, display: "grid", placeItems: "center",
+      color: C.muted, fontSize: 12.5, textDecoration: "none",
+    }}>
+      {links[path]
+        ? <img src={links[path]} alt={label} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+        : "Loading…"}
+      <span style={{
+        position: "absolute", left: 0, right: 0, bottom: 0, padding: "4px 6px", textAlign: "center",
+        background: "#0B0718CC", color: C.ink, fontSize: 12,
+      }}>{label}</span>
+    </a>
+  );
+
+  return (
+    <>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 10, maxWidth: "58ch" }}>
+        Approving puts the medal on their profile. Either way the photos are deleted. Tap a photo to see it full size.
+      </div>
+      <MedalRule text={MEDAL_RULE_SEND} style={{ marginBottom: 16 }} />
+      {err && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12 }}>{err}</div>}
+      {rows === null ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows === "error" ? (
+        <div style={{ color: C.magenta, fontSize: 14, lineHeight: 1.5 }}>
+          Medals waiting could not be loaded. If this is new, run medal-claims-schema.sql in Supabase.
+        </div>
+      ) : rows.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>No medals are waiting.</div>
+      ) : rows.map((c) => (
+        <div key={c.id} style={{ ...card, marginBottom: 10, borderLeft: `3px solid ${PLACE_COLOR[c.place]}` }}>
+          <div className="bx-d" style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>
+            {names[c.blader_id] || "A blader"}
+            {c.teammate_id && <span style={{ color: C.muted, fontWeight: 600 }}> & {names[c.teammate_id] || "teammate"}</span>}
+          </div>
+          <div style={{ fontSize: 14.5, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 2 }}>
+            <Medal size={15} color={PLACE_COLOR[c.place]} />{PLACE_LABEL[c.place]} · {c.tournament_name}
+            <CategoryTag category={c.category} />
+          </div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>
+            {c.organiser_name} · {c.season} · sent {new Date(c.created_at).toLocaleDateString()}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, maxWidth: 420 }}>
+            {photo(c.front_path, "Front")}
+            {photo(c.back_path, "Back")}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn tone="primary" disabled={!!busy} onClick={() => decide(c, true)}>
+              <Check size={15} />{busy === c.id ? "Saving…" : "Approve"}
+            </Btn>
+            <Btn tone="ghost" disabled={!!busy} onClick={() => setRefusing(c)}>
+              <X size={15} />Turn down
+            </Btn>
+          </div>
+        </div>
+      ))}
+      {refusing && (
+        <Confirm
+          title="Turn this medal down?"
+          body={`${PLACE_LABEL[refusing.place]} at ${refusing.tournament_name} will not be added, and its photos are deleted. They can send it in again.`}
+          confirmLabel="Turn down" tone="danger"
+          onConfirm={() => { const c = refusing; setRefusing(null); decide(c, false); }}
+          onClose={() => setRefusing(null)}
+        />
+      )}
+    </>
   );
 }
 
@@ -6733,7 +7091,7 @@ function ApprovalsSheet({ onClose }) {
  * Signing in is a button in the corner rather than a wall, because almost
  * everyone who opens this is here to watch, not to score.
  */
-function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile }) {
+function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile, awarder, waiting = 0 }) {
   const hosted = mine.filter((e) => e.role === "owner");
   const reffed = mine.filter((e) => e.role === "referee");
 
@@ -6847,9 +7205,15 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
                   Signed in · {profile.email}
                 </span>
               )}
-              {profile.is_staff && (
+              {(profile.is_staff || awarder) && (
                 <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
                   Approvals
+                  {waiting > 0 && (
+                    <span className="bx-d" style={{
+                      background: C.magenta, color: "#14020A", borderRadius: 9, minWidth: 18, height: 18,
+                      fontSize: 11.5, fontWeight: 800, display: "inline-grid", placeItems: "center", padding: "0 5px",
+                    }}>{waiting}</span>
+                  )}
                 </Btn>
               )}
             </div>
@@ -6953,6 +7317,8 @@ export default function App() {
   const [bladerVersion, setBladerVersion] = useState(0);  // bumped after an edit, to reload
   const [awarder, setAwarder] = useState(false);       // holds medal access
   const [awarding, setAwarding] = useState(null);      // the blader a medal is being given to
+  const [claiming, setClaiming] = useState(null);      // { blader, waiting }: sending your own medal in
+  const [waiting, setWaiting] = useState(0);           // hosts and medals waiting on this account
 
   useEffect(() => {
     currentSession().then(setSession);
@@ -6986,6 +7352,17 @@ export default function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  // What is waiting on this account to decide: shown on the Approvals button.
+  const isStaff = !!(profile && profile.is_staff);
+  const countWaiting = async () => {
+    const [h, m] = await Promise.all([
+      isStaff ? pendingHosts().then((r) => r.length) : 0,
+      awarder ? medalClaimCount() : 0,
+    ]);
+    setWaiting(h + m);
+  };
+  useEffect(() => { if (isStaff || awarder) countWaiting(); else setWaiting(0); }, [isStaff, awarder]);
 
   const openEvent = (id) => {
     history.pushState({}, "", "?t=" + id);
@@ -7078,10 +7455,14 @@ export default function App() {
         onOpen={(e) => openEvent(e.id)}
         onNew={() => setMaking(true)}
         onApprovals={() => setSheet("approvals")}
+        awarder={awarder} waiting={waiting}
         onSignIn={() => setSigningIn(true)}
         onSignOut={async () => { await signOut(); setOpenId(null); }}
       />
-      {sheet === "approvals" && <ApprovalsSheet onClose={() => setSheet(null)} />}
+      {sheet === "approvals" && (
+        <ApprovalsSheet isStaff={isStaff} isAwarder={awarder}
+          onClose={() => { setSheet(null); setBladerVersion((v) => v + 1); countWaiting(); }} />
+      )}
       {sheet === "bladers" && (
         <BladersSheet key={bladerVersion} onOpen={setViewBlader} onClose={() => setSheet(null)} />
       )}
@@ -7091,12 +7472,18 @@ export default function App() {
           canAward={awarder} isStaff={!!(profile && profile.is_staff)}
           onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)}
           onAward={setAwarding}
+          onClaim={(b, n) => setClaiming({ blader: b, waiting: n })}
           onOpenEvent={(eid) => { setViewBlader(null); setSheet(null); openEvent(eid); }} />
       )}
       {awarding && awarder && (
         <MedalSheet blader={awarding} directory={directory}
           onClose={() => setAwarding(null)}
           onSaved={() => { setAwarding(null); setBladerVersion((v) => v + 1); }} />
+      )}
+      {claiming && session && (
+        <MedalSheet claim blader={claiming.blader} waiting={claiming.waiting} directory={directory}
+          onClose={() => setClaiming(null)}
+          onSaved={() => { setClaiming(null); setBladerVersion((v) => v + 1); }} />
       )}
       {editing && me && session && (
         <ProfileEditSheet meId={session.user.id} blader={me}
