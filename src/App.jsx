@@ -4207,21 +4207,103 @@ function DeckSection({ t, playerId, canEdit, update }) {
           </Btn>
         )}
       </div>
-      {deck.length ? deck.map((c, i) => (
-        <div key={i} style={{
-          display: "flex", alignItems: "center", gap: 10, background: C.surface,
-          border: `1px solid ${C.line}`, borderRadius: 3, padding: "9px 12px", marginBottom: 6,
-        }}>
-          <span className="bx-d" style={{ fontSize: 13, color: C.muted, width: 16 }}>{i + 1}</span>
-          <span className="bx-d" style={{ flex: 1, fontSize: 16, fontWeight: 700 }}>{comboLabel(c)}</span>
-          <span style={{ fontSize: 11.5, color: C.muted }}>{COMBO_TYPES[c.type].label}</span>
-        </div>
-      )) : (
+      {deck.length ? <DeckView deck={deck} /> : (
         <div style={{ color: C.muted, fontSize: 13.5 }}>No deck entered. It is optional.</div>
       )}
       {editing && (
         <DeckEditor title={`${p.name}'s deck`} format={t.format} deck={deck}
           onSave={save} onClose={() => setEditing(false)} />
+      )}
+    </div>
+  );
+}
+
+/** A part's catalogue picture, by the name a deck stores. */
+const partPicture = (slot, name) => {
+  const hit = name ? findPart(slot, name) : null;
+  return hit && hit.image ? hit.image : null;
+};
+
+/**
+ * A deck as pictures and words: each beyblade's written name, then every
+ * part in it with its picture. A part with no picture still shows its name.
+ */
+function DeckView({ deck, compact = false }) {
+  return (deck || []).map((c, i) => {
+    const type = COMBO_TYPES[c.type] ? c.type : "bx";
+    const parts = COMBO_TYPES[type].slots.filter((slot) => c[slot]);
+    return (
+      <div key={i} style={{
+        background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
+        padding: compact ? "7px 9px" : "9px 12px", marginBottom: 6,
+      }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 7 }}>
+          <span className="bx-d" style={{ fontSize: 13, color: C.muted, width: 16 }}>{i + 1}</span>
+          <span className="bx-d" style={{ flex: 1, fontSize: compact ? 14.5 : 16, fontWeight: 700 }}>{comboLabel(c)}</span>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{COMBO_TYPES[type].label}</span>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingLeft: 26 }}>
+          {parts.map((slot) => (
+            <div key={slot} title={SLOT_LABEL[slot]} style={{
+              display: "flex", alignItems: "center", gap: 6, background: C.base, border: `1px solid ${C.line}`,
+              borderRadius: 3, padding: "3px 8px 3px 3px",
+            }}>
+              <PartThumb path={partPicture(slot, c[slot])} size={compact ? 26 : 34} />
+              <div style={{ lineHeight: 1.15 }}>
+                <div style={{ fontSize: 10.5, color: C.muted }}>{SLOT_LABEL[slot]}</div>
+                <div style={{ fontSize: compact ? 12.5 : 13.5 }}>{c[slot]}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  });
+}
+
+/**
+ * A part box: type freely, and the catalogue's matches drop down underneath
+ * with their pictures and names. Anything typed is kept, so a part the
+ * catalogue does not have yet can still be entered.
+ */
+function PartInput({ type, slot, value, onChange, invalid }) {
+  const [open, setOpen] = useState(false);
+  const q = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const options = partOptions(type, slot);
+  const shown = (q
+    ? options.filter((o) => [o.name, o.abbr, ...(o.aliases || [])].some((x) => x && x.toLowerCase().replace(/[^a-z0-9]/g, "").includes(q)))
+    : options).slice(0, 40);
+  const current = partPicture(slot, value);
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+        <PartThumb path={current} size={38} />
+        <input style={{ ...inputStyle, padding: "9px 11px", borderColor: invalid ? C.magenta : C.line }}
+          value={value || ""} placeholder={`Type or choose a ${SLOT_LABEL[slot].toLowerCase()}`}
+          onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onChange={(e) => { onChange(e.target.value); setOpen(true); }} />
+      </div>
+      {open && shown.length > 0 && (
+        <div style={{
+          position: "absolute", left: 45, right: 0, top: "100%", zIndex: 5, marginTop: 3,
+          maxHeight: 264, overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`,
+          borderRadius: 3, boxShadow: "0 8px 24px #0008",
+        }}>
+          {shown.map((o) => (
+            <button key={o.name} type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { onChange(o.name); setOpen(false); }}
+              style={{
+                width: "100%", display: "flex", alignItems: "center", gap: 9, textAlign: "left",
+                background: o.name === value ? `${C.cyan}22` : "none", border: "none",
+                borderBottom: `1px solid ${C.line}55`, color: C.ink, padding: "6px 9px", cursor: "pointer",
+              }}>
+              <PartThumb path={o.image} size={34} />
+              <span style={{ flex: 1, fontSize: 14 }}>{o.name}</span>
+              {o.abbr && <span style={{ fontSize: 12, color: C.muted }}>{o.abbr}</span>}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -4252,11 +4334,6 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
         any part — letters work too, like LF or 3-60.
       </div>
 
-      {Object.keys(COMBO_TYPES).flatMap((type) => COMBO_TYPES[type].slots.map((slot) => (
-        <datalist key={`${type}-${slot}`} id={`parts-${type}-${slot}`}>
-          {partOptions(type, slot).map((o) => <option key={o.name} value={o.name} />)}
-        </datalist>
-      )))}
 
       {combos.map((c, i) => (
         <div key={i} style={{ ...card, marginBottom: 12 }}>
@@ -4294,9 +4371,8 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
                   {slot === "ratchet" ? " (leave empty if the bit has its own)" : ""}
                   {slot === "lock" ? " (may repeat; only one metal lock chip per deck)" : ""}
                 </div>
-                <input style={{ ...inputStyle, padding: "9px 11px", borderColor: x ? C.magenta : C.line }}
-                  list={`parts-${c.type}-${slot}`} value={c[slot] || ""}
-                  onChange={(e) => change(i, { [slot]: e.target.value })} />
+                <PartInput type={c.type} slot={slot} value={c[slot] || ""} invalid={!!x}
+                  onChange={(v) => change(i, { [slot]: v })} />
                 {x && (
                   <div style={{ fontSize: 12, color: C.magenta, marginTop: 3 }}>
                     {x.rule === "metal"
@@ -6430,8 +6506,8 @@ function Participation({ id, onOpenEvent }) {
               {r.wins}W {r.losses}L · {r.pf} points scored, {r.pa} conceded
             </div>
             {r.deck && r.deck.length > 0 && (
-              <div style={{ fontSize: 12, color: C.muted, marginTop: 4, lineHeight: 1.45 }}>
-                Deck: {r.deck.map(comboLabel).join(" · ")}
+              <div style={{ marginTop: 8 }}>
+                <DeckView deck={r.deck} compact />
               </div>
             )}
           </button>

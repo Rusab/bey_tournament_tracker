@@ -73,3 +73,23 @@ Public, with two tables and a filter: **All tournaments / Official only**.
 - Battle credit: the score sheet records which bey each side launched, so
   combos are credited for the battles they actually won.
 - Automatic blade detection from a photo.
+
+## Deck photo detection (in the browser, free)
+
+- Done first: part pickers show each match's picture and name, and decks are
+  shown with part pictures beside the text.
+- One photo of the whole deck: beys laid out top-down on a plain surface, not
+  touching. Each bey is found with plain image processing (background
+  separation, then round shapes), cropped, and matched. The player can move or
+  add a box the processing missed.
+- Matching: DINOv2-small, quantised, run in the browser (transformers.js or
+  onnxruntime-web). Its embedding is compared in Supabase with pgvector
+  against verified references of each part. The top 3 are shown with pictures
+  and names; the player confirms.
+- References: the catalogue pictures, embedded offline with rotations, colour
+  jitter and synthetic backgrounds. A confirmed player photo is a reference
+  only once you approve it, from a Photos tab in Approvals.
+- Every approved deck photo comes with its boxes and labels, the dataset for
+  training a small detector later.
+- Below a minimum similarity the app says it is not sure and asks the player
+  to pick the part.
