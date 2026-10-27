@@ -6639,9 +6639,16 @@ function ProofPicker({ label, blob, onPick, onError }) {
       onError("That photo could not be read. Try a JPEG or PNG.");
     }
   };
+  /*
+   * The box opens the camera straight away on a phone (capture), since a
+   * photo of the medal in hand is the point. Most phones then offer no
+   * gallery, so the link under it picks a photo already taken. A computer
+   * ignores capture and opens a file picker either way.
+   */
   return (
+    <div style={{ flex: 1, minWidth: 0 }}>
     <label style={{
-      flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
       gap: 6, cursor: "pointer", aspectRatio: "1 / 1", borderRadius: 3, overflow: "hidden", position: "relative",
       border: `1px dashed ${blob ? C.green : C.line}`, background: C.base, color: C.muted, fontSize: 13,
     }}>
@@ -6651,13 +6658,21 @@ function ProofPicker({ label, blob, onPick, onError }) {
           <span style={{
             position: "absolute", left: 0, right: 0, bottom: 0, padding: "5px 6px", textAlign: "center",
             background: "#0B0718CC", color: C.ink, fontSize: 12.5,
-          }}>{label} · tap to change</span>
+          }}>{label} · tap to retake</span>
         </>
       ) : (
-        <><Camera size={22} /><span>{label}</span></>
+        <><Camera size={22} /><span style={{ textAlign: "center", padding: "0 6px" }}>{label}</span>
+          <span style={{ fontSize: 11.5 }}>Tap to take a photo</span></>
       )}
+      <input type="file" accept="image/*" capture="environment" onChange={pick} style={{ display: "none" }} />
+    </label>
+    <label style={{
+      display: "block", textAlign: "center", marginTop: 6, fontSize: 12.5, color: C.cyan, cursor: "pointer",
+    }}>
+      or choose a photo
       <input type="file" accept="image/*" onChange={pick} style={{ display: "none" }} />
     </label>
+    </div>
   );
 }
 
