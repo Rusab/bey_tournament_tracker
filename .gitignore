@@ -2,3 +2,6 @@ node_modules
 dist
 .env
 .env.local
+
+# Part pictures fetched for the catalogue, uploaded from the Parts screen, never committed
+part-images/

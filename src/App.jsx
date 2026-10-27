@@ -7296,6 +7296,7 @@ function PartsSheet({ onClose, onChanged }) {
   const [editing, setEditing] = useState(null);     // a row, or { kind, name } for a new part
   const [decks, setDecks] = useState(undefined);    // every tournament's decks, for unknown names
   const [merging, setMerging] = useState(null);     // an unknown name being merged
+  const [bulk, setBulk] = useState(null);           // files chosen for bulk pictures
   const [target, setTarget] = useState("");
   const [msg, setMsg] = useState(null);
 
@@ -7366,6 +7367,20 @@ function PartsSheet({ onClose, onChanged }) {
                   <Plus size={15} />Add
                 </Btn>
               </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+                <span style={{ fontSize: 13, color: C.muted }}>Bulk add pictures:</span>
+                {[["Choose a folder", true], ["Choose pictures", false]].map(([label, folder]) => (
+                  <label key={label} style={{
+                    display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "6px 10px",
+                    background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3, fontSize: 13,
+                  }}>
+                    <ImageIcon size={14} />{label}
+                    <input type="file" accept="image/*" multiple style={{ display: "none" }}
+                      {...(folder ? { webkitdirectory: "", directory: "" } : {})}
+                      onChange={(e) => { const f = [...(e.target.files || [])]; e.target.value = ""; if (f.length) setBulk(f); }} />
+                  </label>
+                ))}
+              </div>
               {shown.length === 0 ? (
                 <div style={{ color: C.muted, fontSize: 14 }}>{q ? "Nothing by that name." : "None yet."}</div>
               ) : shown.map((r) => (
@@ -7424,6 +7439,10 @@ function PartsSheet({ onClose, onChanged }) {
         </>
       )}
 
+      {bulk && rows && (
+        <BulkPictures files={bulk} rows={rows} onClose={() => setBulk(null)}
+          onDone={(text) => { setBulk(null); setMsg(text); refresh(); }} />
+      )}
       {editing && (
         <PartEditor part={editing} onClose={() => setEditing(null)}
           onSaved={(text) => { setEditing(null); setMsg(text); refresh(); }} />
@@ -7452,6 +7471,104 @@ function PartsSheet({ onClose, onChanged }) {
         </div>
       )}
     </SheetFrame>
+  );
+}
+
+/**
+ * Pictures for many parts at once. Each file is matched to a part by its
+ * name ("Dran Sword.png"), and by its folder too when the files are sorted
+ * into folders named after the kinds ("blade/Dran Sword.png"), which
+ * settles a name that more than one kind of part has.
+ */
+function BulkPictures({ files, rows, onClose, onDone }) {
+  const [replace, setReplace] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(0);
+  const [failed, setFailed] = useState([]);
+
+  const items = useMemo(() => files.map((file) => {
+    const base = file.name.replace(/\.[^.]+$/, "");
+    const folder = (file.webkitRelativePath || "").split("/").slice(-2, -1)[0] || "";
+    const kind = PART_KINDS.some((k) => k.key === folder) ? folder : null;
+    const hits = rows.filter((r) => (!kind || r.kind === kind)
+      && (partKey(r.name) === partKey(base) || (r.aliases || []).some((a) => partKey(a) === partKey(base))));
+    return { file, base, part: hits.length === 1 ? hits[0] : null, why: hits.length > 1 ? "matches more than one kind of part" : "no part by that name" };
+  }), [files, rows]);
+
+  const matched = items.filter((x) => x.part);
+  const todo = matched.filter((x) => replace || !x.part.image_path);
+  const unmatched = items.filter((x) => !x.part);
+
+  const run = async () => {
+    setRunning(true);
+    const bad = [];
+    for (const x of todo) {
+      try {
+        const blob = await shrinkImage(x.file, "part");
+        if (!blob) throw new Error("could not be read");
+        const path = await uploadPartImage(x.part.kind, blob);
+        const { error } = await savePart(x.part.id, { image_path: path });
+        if (error) { removePartImage(path); throw error; }
+        if (x.part.image_path) removePartImage(x.part.image_path);
+      } catch (err) {
+        bad.push(`${x.base}: ${err.message || "failed"}`);
+      }
+      setDone((n) => n + 1);
+    }
+    setFailed(bad);
+    setRunning(false);
+    if (!bad.length) onDone(`${todo.length} picture${todo.length === 1 ? "" : "s"} added.`);
+  };
+
+  return (
+    <SheetFrame title="Bulk add pictures" onClose={running ? () => {} : onClose}>
+      <div style={{ fontSize: 14.5, marginBottom: 6 }}>
+        {matched.length} of {items.length} file{items.length === 1 ? "" : "s"} match a part.
+      </div>
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
+        {matched.length - matched.filter((x) => !x.part.image_path).length} of those parts already have a picture.
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, cursor: "pointer" }}>
+        <input type="checkbox" checked={replace} disabled={running} onChange={(e) => setReplace(e.target.checked)}
+          style={{ width: 17, height: 17, accentColor: C.magenta }} />
+        <span style={{ fontSize: 14.5 }}>Replace pictures already set</span>
+      </label>
+
+      {running || done > 0 ? (
+        <div style={{ fontSize: 14.5, marginBottom: 14 }}>Uploading… {done} of {todo.length}</div>
+      ) : (
+        <Btn tone="primary" disabled={!todo.length} onClick={run} style={{ marginBottom: 18 }}>
+          <Check size={15} />Add {todo.length} picture{todo.length === 1 ? "" : "s"}
+        </Btn>
+      )}
+      {failed.length > 0 && (
+        <div style={{ color: C.magenta, fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
+          {failed.length} did not upload: {failed.join("; ")}
+          <div style={{ marginTop: 8 }}><Btn onClick={() => onDone(`${todo.length - failed.length} pictures added.`)}>Done</Btn></div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))", gap: 8, marginBottom: 18 }}>
+        {matched.map((x) => <BulkThumb key={x.file.name + x.part.id} item={x} />)}
+      </div>
+      {unmatched.length > 0 && (
+        <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.5 }}>
+          <div style={{ color: C.gold, marginBottom: 4 }}>Not matched, so left out ({unmatched.length}):</div>
+          {unmatched.map((x) => `${x.base} (${x.why})`).join(", ")}
+        </div>
+      )}
+    </SheetFrame>
+  );
+}
+
+function BulkThumb({ item }) {
+  const url = useMemo(() => URL.createObjectURL(item.file), [item.file]);
+  useEffect(() => () => URL.revokeObjectURL(url), [url]);
+  return (
+    <div style={{ textAlign: "center", opacity: item.part.image_path ? 0.6 : 1 }}>
+      <PartThumb src={url} size={84} />
+      <div style={{ fontSize: 11.5, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.part.name}</div>
+    </div>
   );
 }
 
