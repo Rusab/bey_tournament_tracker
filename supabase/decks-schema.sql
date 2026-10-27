@@ -60,6 +60,11 @@ grant execute on function public.runs_event(uuid) to anon, authenticated;
 grant execute on function public.event_started(uuid) to anon, authenticated;
 grant execute on function public.deck_is_mine(uuid, text) to anon, authenticated;
 
+-- The read rule below asks this for every viewer, signed in or not. A
+-- visitor who may not run it at all would have every read refused, so it
+-- is open to visitors too; it simply answers false for them.
+grant execute on function public.is_parts_manager() to anon;
+
 -- ---------------------------------------------------------------- decks
 
 create table if not exists event_decks (
