@@ -44,7 +44,7 @@ export let BLADES = [
 ];
 
 /* Unique Line Infinity blades (UX-19, UX-20): blade and bit, no ratchet. */
-export let INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
+export let INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie", { name: "HellsNether", aliases: ["Hells Nether", "Hell's Nether"] }];
 
 /*
  * Custom Line lock chips, Infinity included
@@ -53,7 +53,7 @@ export let INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
  * Volt - may be in a deck at all.
  */
 export let LOCK_CHIPS = [
-  { name: "Bahamut" }, { name: "Brachio" }, { name: "Cerberus" }, { name: "Dran" },
+  { name: "Bahamut" }, { name: "Brachio" }, { name: "Cerberus" }, { name: "Croco" }, { name: "Dran" },
   { name: "Emperor", metal: true }, { name: "Fox" }, { name: "Hells" }, { name: "Knight" },
   { name: "Pegasus" }, { name: "Perseus" }, { name: "Ragna" }, { name: "Rhino" },
   { name: "Sol" }, { name: "Unicorn" }, { name: "Valkyrie", metal: true }, { name: "Wizard" },
@@ -70,12 +70,12 @@ export let MAIN_BLADES = [
  * with an over blade. Not on any of the lists; taken from the product names
  * CX-13 to CX-18 and confirmed by hand (CX-13 is Blitz, not "Bliz").
  */
-export let METAL_BLADES = ["Blitz", "Delta", "Fortress", "Rage", "Whip"];
+export let METAL_BLADES = ["Blitz", "Delta", "Fortress", "Rage", "Tread", "Whip"];
 
 /* Custom Line Infinity over blades. */
 export let OVER_BLADES = [
   { name: "Break", abbr: "B" }, { name: "Flow", abbr: "F" }, { name: "Guard", abbr: "G" },
-  { name: "Outer", abbr: "O" }, { name: "Peak", abbr: "P" },
+  { name: "Outer", abbr: "O" }, { name: "Peak", abbr: "P" }, { name: "Tough", abbr: "T" },
 ];
 
 /* Custom Line assist blades, Infinity included. Brachio Whip's W is Wheel. */
@@ -83,7 +83,7 @@ export let ASSIST_BLADES = [
   { name: "Assault", abbr: "A" }, { name: "Bumper", abbr: "B" }, { name: "Charge", abbr: "C" },
   { name: "Dual", abbr: "D" }, { name: "Erase", abbr: "E" }, { name: "Free", abbr: "F" },
   { name: "Heavy", abbr: "H" }, { name: "Jaggy", abbr: "J" }, { name: "Knuckle", abbr: "K" },
-  { name: "Odd", abbr: "O" }, { name: "Round", abbr: "R" }, { name: "Slash", abbr: "S" },
+  { name: "Odd", abbr: "O" }, { name: "Quell", abbr: "Q" }, { name: "Round", abbr: "R" }, { name: "Slash", abbr: "S" },
   { name: "Turn", abbr: "T" }, { name: "Vertical", abbr: "V" }, { name: "Wheel", abbr: "W" },
 ];
 
@@ -91,7 +91,7 @@ export let ASSIST_BLADES = [
 export let RATCHETS = [
   "0-60", "0-70", "0-80", "1-50", "1-60", "1-70", "1-80", "2-60", "2-70", "2-80",
   "3-60", "3-70", "3-80", "3-85", "4-50", "4-55", "4-60", "4-70", "4-80", "5-60",
-  "5-70", "5-80", "6-60", "6-70", "6-80", "7-55", "7-60", "7-80", "8-70", "9-60",
+  "5-50", "5-70", "5-80", "6-60", "6-70", "6-80", "7-55", "7-60", "7-80", "8-70", "9-60",
   "9-65", "9-70", "9-80", "M-85",
 ];
 

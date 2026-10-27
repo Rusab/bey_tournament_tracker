@@ -7511,6 +7511,7 @@ function PartsSheet({ onClose, onChanged }) {
   const [decks, setDecks] = useState(undefined);    // every tournament's decks, for unknown names
   const [merging, setMerging] = useState(null);     // an unknown name being merged
   const [bulk, setBulk] = useState(null);           // files chosen for bulk pictures
+  const [fromLinks, setFromLinks] = useState(false);
   const [target, setTarget] = useState("");
   const [msg, setMsg] = useState(null);
 
@@ -7583,6 +7584,10 @@ function PartsSheet({ onClose, onChanged }) {
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
                 <span style={{ fontSize: 13, color: C.muted }}>Bulk add pictures:</span>
+                <button onClick={() => setFromLinks(true)} style={{
+                  display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "6px 10px",
+                  background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3, fontSize: 13, color: C.ink,
+                }}><Link2 size={14} />From links</button>
                 {[["Choose a folder", true], ["Choose pictures", false]].map(([label, folder]) => (
                   <label key={label} style={{
                     display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "6px 10px",
@@ -7653,6 +7658,10 @@ function PartsSheet({ onClose, onChanged }) {
         </>
       )}
 
+      {fromLinks && rows && (
+        <PicturesFromLinks rows={rows} onClose={() => setFromLinks(false)}
+          onDone={(text) => { setFromLinks(false); setMsg(text); refresh(); }} />
+      )}
       {bulk && rows && (
         <BulkPictures files={bulk} rows={rows} onClose={() => setBulk(null)}
           onDone={(text) => { setBulk(null); setMsg(text); refresh(); }} />
@@ -7770,6 +7779,85 @@ function BulkPictures({ files, rows, onClose, onDone }) {
           <div style={{ color: C.gold, marginBottom: 4 }}>Not matched, so left out ({unmatched.length}):</div>
           {unmatched.map((x) => `${x.base} (${x.why})`).join(", ")}
         </div>
+      )}
+    </SheetFrame>
+  );
+}
+
+/**
+ * Pictures fetched straight from links, by the browser: one line per part,
+ * "kind/Name | link", as in "ratchet/5-50 | https://...". The kind may be
+ * left out when the name belongs to only one kind of part.
+ */
+function PicturesFromLinks({ rows, onClose, onDone }) {
+  const [text, setText] = useState("");
+  const [replace, setReplace] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [log, setLog] = useState([]);
+
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+    const [left, url] = l.split("|").map((x) => (x || "").trim());
+    const m = left.match(/^([a-z_]+)\/(.+)$/);
+    const kind = m && PART_KINDS.some((k) => k.key === m[1]) ? m[1] : null;
+    const name = m && kind ? m[2] : left;
+    const hits = rows.filter((r) => (!kind || r.kind === kind)
+      && (partKey(r.name) === partKey(name) || (r.aliases || []).some((a) => partKey(a) === partKey(name))));
+    return { name, url, part: hits.length === 1 ? hits[0] : null, ok: /^https?:\/\//.test(url || "") };
+  });
+  const todo = lines.filter((x) => x.part && x.ok && (replace || !x.part.image_path));
+
+  const run = async () => {
+    setRunning(true);
+    const out = [];
+    for (const x of todo) {
+      try {
+        const r = await fetch(x.url);
+        if (!r.ok) throw new Error(`the link answered ${r.status}`);
+        const blob = await shrinkImage(await r.blob(), "part");
+        if (!blob) throw new Error("not a picture");
+        const path = await uploadPartImage(x.part.kind, blob);
+        const { error } = await savePart(x.part.id, { image_path: path });
+        if (error) { removePartImage(path); throw error; }
+        if (x.part.image_path) removePartImage(x.part.image_path);
+        out.push(`${x.part.name}: added`);
+      } catch (err) {
+        out.push(`${x.name}: ${err.message || "failed"}`);
+      }
+      setLog([...out]);
+    }
+    setRunning(false);
+    const good = out.filter((l) => l.endsWith(": added")).length;
+    if (good === todo.length) onDone(`${good} picture${good === 1 ? "" : "s"} added from links.`);
+  };
+
+  return (
+    <SheetFrame title="Pictures from links" onClose={running ? () => {} : onClose}>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 10 }}>
+        One part per line: <code>kind/Name | link</code>, like <code>ratchet/5-50 | https://&hellip;</code>.
+        Kinds: {PART_KINDS.map((k) => k.key).join(", ")}.
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} disabled={running} rows={9}
+        style={{ ...inputStyle, fontFamily: "monospace", fontSize: 12.5, marginBottom: 10, resize: "vertical" }} />
+      {lines.length > 0 && (
+        <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+          {lines.map((x, i) => (
+            <div key={i} style={{ color: !x.part || !x.ok ? C.gold : x.part.image_path && !replace ? C.muted : C.ink }}>
+              {x.part ? x.part.name : x.name} {"—"} {!x.part ? "no part by that name" : !x.ok ? "no link"
+                : x.part.image_path && !replace ? "already has a picture" : "ready"}
+            </div>
+          ))}
+        </div>
+      )}
+      <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 14, cursor: "pointer" }}>
+        <input type="checkbox" checked={replace} disabled={running} onChange={(e) => setReplace(e.target.checked)}
+          style={{ width: 17, height: 17, accentColor: C.magenta }} />
+        <span style={{ fontSize: 14.5 }}>Replace pictures already set</span>
+      </label>
+      <Btn tone="primary" disabled={running || !todo.length} onClick={run}>
+        <Check size={15} />{running ? `Adding… ${log.length} of ${todo.length}` : `Add ${todo.length} picture${todo.length === 1 ? "" : "s"}`}
+      </Btn>
+      {log.length > 0 && !running && (
+        <div style={{ fontSize: 13, color: C.muted, marginTop: 12, lineHeight: 1.6 }}>{log.map((l, i) => <div key={i}>{l}</div>)}</div>
       )}
     </SheetFrame>
   );
