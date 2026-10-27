@@ -6176,8 +6176,10 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
     if (meId && meId === id) loadClaims();
   }, [id, meId]);
 
-  // Taken back by whoever gave it, or by staff — the same rule the database applies.
-  const canRemove = (m) => canAward && (m.awarded_by === meId || isStaff);
+  // Taken back by whoever gave it, or by staff, or by the blader it belongs
+  // to — the same rules the database applies.
+  const ownProfile = !!meId && meId === id;
+  const canRemove = (m) => ownProfile || (canAward && (m.awarded_by === meId || isStaff));
 
   const mine = meId && meId === id;
   const Row = ({ label, children, note }) => (
@@ -6277,8 +6279,11 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
       {dropping && (
         <Confirm
           title="Remove this medal?"
-          body={`${PLACE_LABEL[dropping.place]} at ${dropping.tournament_name}. It comes off ${b ? b.blader_name : "this"}'s profile`
-            + (dropping.teammate_id ? "; their teammate keeps theirs unless you remove that one too." : ".")}
+          body={ownProfile
+            ? `${PLACE_LABEL[dropping.place]} at ${dropping.tournament_name} comes off your profile for good. To have it back it would need sending in for approval again.`
+              + (dropping.teammate_id ? " Your teammate keeps theirs." : "")
+            : `${PLACE_LABEL[dropping.place]} at ${dropping.tournament_name}. It comes off ${b ? b.blader_name : "this"}'s profile`
+              + (dropping.teammate_id ? "; their teammate keeps theirs unless you remove that one too." : ".")}
           confirmLabel="Remove" tone="danger"
           onConfirm={async () => {
             const m = dropping;
