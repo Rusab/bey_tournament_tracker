@@ -1557,6 +1557,15 @@ function matchLabel(t, m, nameOf) {
   return { id: m.id, kind: m.groupId ? "group" : "ko", where, who, score: `${s1}–${s2}`, order };
 }
 
+/*
+ * Decks stay hidden from the public until the tournament starts, which is
+ * when its first match is scored, so nobody can plan against a deck in
+ * advance. Organisers always see them; a blader always sees their own.
+ * This only governs what the app shows: tournament data is public, so a
+ * determined reader could still find a deck early.
+ */
+const tournamentStarted = (t) => allMatchesOf(t).some((m) => (m.events || []).length > 0);
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -1960,7 +1969,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           onSave={(value) => saveRound(editRound, value)} />
       )}
       {detail && (
-        <PlayerSheet playerId={detail} t={t} nameOf={nameOf}
+        <PlayerSheet playerId={detail} t={t} nameOf={nameOf} meId={meId}
           allMatches={allMatches} onClose={() => setDetail(null)}
           isAdmin={isAdmin} update={update} eventId={eventId} />
       )}
@@ -2875,11 +2884,11 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
     setShowDecks(v);
     try { localStorage.setItem(MATCH_DECKS_KEY, v ? "1" : "0"); } catch (e) { /* private mode */ }
   };
-  const anyDeck = (t.players || []).some((p) => p.deck && p.deck.length);
+  const anyDeck = (isAdmin || tournamentStarted(t)) && (t.players || []).some((p) => p.deck && p.deck.length);
   const blades = useMemo(() => {
-    if (!showDecks) return null;
+    if (!showDecks || !anyDeck) return null;
     return Object.fromEntries((t.players || []).map((p) => [p.id, bladesOf(t, p.id)]));
-  }, [showDecks, t]);
+  }, [showDecks, anyDeck, t]);
 
   if (!t.groupMatches.length) {
     return <EmptyState title="No fixtures yet"
@@ -4471,7 +4480,7 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
   );
 }
 
-function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId }) {
+function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId, meId }) {
   const st = playerStats(playerId, allMatches, t);
   const group = t.groups.find((g) => g.playerIds.includes(playerId));
   const gi = t.groups.findIndex((g) => g.playerIds.includes(playerId));
@@ -4533,7 +4542,9 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
           <Stat label="Against" value={st.pa} />
         </div>
 
-        <DeckSection t={t} playerId={playerId} canEdit={!!(isAdmin && update)} update={update} />
+        {(isAdmin || tournamentStarted(t) || (meId && (t.players.find((x) => x.id === playerId) || {}).profileId === meId)) && (
+          <DeckSection t={t} playerId={playerId} canEdit={!!(isAdmin && update)} update={update} />
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
           <Blade color={C.cyan} h={16} />
@@ -6411,7 +6422,7 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
               {err && <div style={{ color: C.magenta, fontSize: 13.5, marginTop: 10 }}>{err}</div>}
             </div>
           ) : (
-            <Participation id={id} onOpenEvent={onOpenEvent} />
+            <Participation id={id} mine={!!mine} onOpenEvent={onOpenEvent} />
           )}
         </>
       )}
@@ -6532,11 +6543,16 @@ function participation(t, bladerId) {
 const RESULT_COLOR = { Champion: C.gold, "Runner-up": "#C9CED6", "3rd place": "#C87941" };
 
 /** The Tournaments tab: every tournament held in the app this blader was linked into. */
-function Participation({ id, onOpenEvent }) {
+function Participation({ id, mine, onOpenEvent }) {
   const [rows, setRows] = useState(undefined);
   useEffect(() => {
     bladerEvents(id).then((evs) => setRows(evs === null ? null : evs
-      .map((e) => ({ e, r: participation(e.data || {}, id) }))
+      .map((e) => {
+        const r = participation(e.data || {}, id);
+        // Another blader's deck shows only once that tournament has started.
+        if (r && !mine && !tournamentStarted(e.data || {})) r.deck = null;
+        return { e, r };
+      })
       .filter((x) => x.r)));
   }, [id]);
 
