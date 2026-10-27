@@ -104,7 +104,7 @@ begin
   front := x::text || '/__claim-test-front.jpg';
   back  := x::text || '/__claim-test-back.jpg';
   send_sql := format('select public.submit_medal_claim(%L, %L, %L, %L, %L, null, %L, %L)',
-    'first', 'unranked_local', '__claim test__', '__claim org__', 'S1', front, back);
+    'first', 'ranked_local', '__claim test__', '__claim org__', 'S1', front, back);
 
   begin
     ------------------------------------------------- the photos go up first
@@ -136,13 +136,13 @@ begin
       case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::claim_results;
 
     step := step + 1;
-    n := pg_temp.attempt(x, replace(send_sql, '''unranked_local''', '''g1'''));
+    n := pg_temp.attempt(x, replace(send_sql, '''ranked_local''', '''g1'''));
     results := results || row(step, 'account sends one in a category that is coming soon', 'refused',
       case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::claim_results;
 
     step := step + 1;
     n := pg_temp.attempt(x, format('select public.submit_medal_claim(%L, %L, %L, %L, %L, null, %L, %L)',
-      'first', 'unranked_local', '__claim test__', '__claim org__', 'S1',
+      'first', 'ranked_local', '__claim test__', '__claim org__', 'S1',
       x::text || '/__never-front.jpg', x::text || '/__never-back.jpg'));
     results := results || row(step, 'account sends one without uploading the photos', 'refused',
       case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::claim_results;
@@ -155,14 +155,14 @@ begin
     step := step + 1;
     n := pg_temp.attempt(x, format(
       'insert into medal_claims (blader_id, place, category, tournament_name, organiser_name, front_path, back_path) values (%L, %L, %L, %L, %L, %L, %L)',
-      x, 'first', 'unranked_local', '__claim test__', '__claim org__', front, back));
+      x, 'first', 'ranked_local', '__claim test__', '__claim org__', front, back));
     results := results || row(step, 'account writes a claim around the rules', 'refused',
       case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::claim_results;
 
     step := step + 1;
     n := pg_temp.attempt(x, format(
       'insert into medals (blader_id, place, tournament_name, organiser_name, category) values (%L, %L, %L, %L, %L)',
-      x, 'first', '__claim test__', '__claim org__', 'unranked_local'));
+      x, 'first', '__claim test__', '__claim org__', 'ranked_local'));
     results := results || row(step, 'account gives itself a medal without approval', 'refused',
       case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::claim_results;
 
@@ -238,7 +238,7 @@ begin
 
     step := step + 1;
     select count(*) into n from medals
-      where blader_id = x and tournament_name = '__claim test__' and category = 'unranked_local' and awarded_by = a;
+      where blader_id = x and tournament_name = '__claim test__' and category = 'ranked_local' and awarded_by = a;
     results := results || row(step, 'approving writes the medal', '1', n::text, n = 1)::claim_results;
 
     step := step + 1;
@@ -261,7 +261,7 @@ begin
     ---------------------------------------------------------- the limit of 5
 
     insert into medal_claims (blader_id, place, category, tournament_name, organiser_name, front_path, back_path)
-    select x, 'second', 'unranked_local', '__claim test__', '__claim org__',
+    select x, 'second', 'ranked_local', '__claim test__', '__claim org__',
            x::text || '/__f' || g, x::text || '/__b' || g
     from generate_series(1, 5) g;
 

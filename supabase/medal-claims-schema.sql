@@ -1,8 +1,8 @@
 -- =====================================================================
 --  Medals, part 2: categories, and medals sent in for approval.
 --
---  Every medal gets a category. Only Unranked Locals and Ranked Locals
---  are open for now; the rest are known to the database so they can be
+--  Every medal gets a category. Only Ranked Locals is open for now
+--  (Unranked Locals was retired); the rest are known to the database so they can be
 --  opened later by editing medal_category_open() alone.
 --
 --  Any account with a blader profile can send a medal in, with a photo
@@ -32,9 +32,10 @@ alter table medals add constraint medals_category check (category is null or cat
   ('unranked_local', 'ranked_local', 'league', 's1', 'g3', 'g2', 'g1', 'gp'));
 
 -- The categories that can be chosen today. Open another by adding it here.
+-- Unranked Locals was retired: medals already filed under it keep it.
 create or replace function public.medal_category_open(p text)
 returns boolean language sql immutable as $$
-  select coalesce(p in ('unranked_local', 'ranked_local'), false);
+  select coalesce(p in ('ranked_local'), false);
 $$;
 
 -- Medals given directly by the approver carry an open category too.

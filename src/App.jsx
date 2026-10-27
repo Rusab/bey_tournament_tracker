@@ -6442,13 +6442,14 @@ function Participation({ id, onOpenEvent }) {
 }
 
 /*
- * What kind of tournament a medal came from. Only the first two can be
+ * What kind of tournament a medal came from. Only Ranked Locals can be
  * chosen for now; the rest are shown, marked coming soon, so the ladder is
  * visible. Opening one later means flipping `open` here and adding it to
- * medal_category_open() in the database.
+ * medal_category_open() in the database. A retired category is no longer
+ * offered, but medals already filed under it keep its name.
  */
 const MEDAL_CATEGORIES = [
-  { key: "unranked_local", label: "Unranked Locals", open: true },
+  { key: "unranked_local", label: "Unranked Locals", retired: true },
   { key: "ranked_local", label: "Ranked Locals", open: true },
   { key: "league", label: "League" },
   { key: "s1", label: "S1" },
@@ -6475,7 +6476,7 @@ function MedalRule({ text, style }) {
 function CategoryPicker({ value, onChange }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 }}>
-      {MEDAL_CATEGORIES.map((c) => {
+      {MEDAL_CATEGORIES.filter((c) => !c.retired).map((c) => {
         const on = value === c.key;
         return (
           <button key={c.key} onClick={() => c.open && onChange(c.key)} disabled={!c.open}
