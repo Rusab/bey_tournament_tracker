@@ -7470,7 +7470,8 @@ function PartThumb({ path, src, size = 40 }) {
       background: C.base, border: `1px solid ${C.line}`, display: "grid", placeItems: "center",
     }}>
       {url
-        ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+        // Sized in pixels: a percentage of a grid cell lets a tall picture, a bit say, overflow and be cut off.
+        ? <img src={url} alt="" style={{ width: size - 4, height: size - 4, objectFit: "contain", display: "block" }} />
         : <ImageIcon size={Math.round(size * 0.42)} color={C.line} />}
     </div>
   );
