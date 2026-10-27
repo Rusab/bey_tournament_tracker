@@ -6074,7 +6074,7 @@ const yearsText = (y) => {
 };
 
 /** Everyone registered, searchable by blader name. Public. */
-function BladersSheet({ onOpen, onClose }) {
+function BladersSheet({ onOpen, onClose, meId, onEdit }) {
   const [rows, setRows] = useState(undefined);
   const [q, setQ] = useState("");
   useEffect(() => { listBladers().then(setRows); }, []);
@@ -6101,16 +6101,21 @@ function BladersSheet({ onOpen, onClose }) {
             {shown.length} blader{shown.length === 1 ? "" : "s"}
           </div>
           {shown.map((r) => (
-            <button key={r.id} onClick={() => onOpen(r.id)} style={{
+            <div key={r.id} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <button onClick={() => onOpen(r.id)} style={{
+              flex: 1, minWidth: 0,
               width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
-              background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
-              padding: "10px 12px", marginBottom: 6, cursor: "pointer", color: C.ink,
+              background: C.surface, border: `1px solid ${r.id === meId ? C.cyan + "88" : C.line}`, borderRadius: 3,
+              padding: "10px 12px", cursor: "pointer", color: C.ink,
             }}>
               <Avatar path={r.photo_path} name={r.blader_name} size={38} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="bx-d" style={{
                   fontSize: 16.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                }}>{r.blader_name}</div>
+                }}>
+                  {r.blader_name}
+                  {r.id === meId && <span style={{ fontSize: 12, color: C.cyan, fontWeight: 600, marginLeft: 7 }}>You</span>}
+                </div>
                 {(yearsText(r.experience_years) || r.favorite_combo) && (
                   <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {[yearsText(r.experience_years), r.favorite_combo].filter(Boolean).join(" · ")}
@@ -6119,6 +6124,15 @@ function BladersSheet({ onOpen, onClose }) {
               </div>
               <ChevronRight size={16} color={C.muted} />
             </button>
+            {r.id === meId && onEdit && (
+              <button onClick={() => onEdit(r)} aria-label="Edit your profile" style={{
+                background: C.surface, border: `1px solid ${C.cyan}88`, borderRadius: 3, color: C.cyan,
+                cursor: "pointer", padding: "0 13px", display: "flex", alignItems: "center", gap: 6, fontSize: 13.5,
+              }}>
+                <Pencil size={15} />Edit
+              </button>
+            )}
+            </div>
           ))}
         </>
       )}
@@ -6198,7 +6212,7 @@ function BladerSheet({ id, meId, canAward, isStaff, onClose, onEdit, onAward, on
           {(mine || canAward) && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 18 }}>
               {mine && (
-                <Btn onClick={onEdit} tone="primary"><Pencil size={15} />Edit profile</Btn>
+                <Btn onClick={() => onEdit(b)} tone="primary"><Pencil size={15} />Edit profile</Btn>
               )}
               {/* The approver gives medals directly; everyone else sends theirs in. */}
               {canAward ? (
@@ -6478,31 +6492,20 @@ const PLACES = ["first", "second", "third", "swiss"];
 const PLACE_LABEL = { first: "1st Place", second: "2nd Place", third: "3rd Place", swiss: "Swiss Medal" };
 const PLACE_COLOR = { first: C.gold, second: "#C9CED6", third: "#C87941", swiss: C.cyan };
 
-/*
- * Seasons newest first, by the number in them, so S10 comes before S9.
- * Anything without a number keeps its place behind those that have one.
- */
-const seasonOrder = (a, b) => {
-  const na = parseInt(String(a).replace(/[^0-9]/g, ""), 10);
-  const nb = parseInt(String(b).replace(/[^0-9]/g, ""), 10);
-  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na;
-  if (Number.isFinite(na) !== Number.isFinite(nb)) return Number.isFinite(na) ? -1 : 1;
-  return String(a).localeCompare(String(b));
-};
 
 /**
- * A blader's podium record, one list per season. Each place shows how many,
- * and opens to the tournaments behind the number. With no medals at all the
- * S1 list still shows, at zero, so the shape of the record is always there.
+ * A blader's podium record. Each place shows how many, and opens to the
+ * tournaments behind the number. With no medals at all the list still
+ * shows, at zero, so the shape of the record is always there.
  */
 function MedalBoard({ medals: every, names, canRemove, onRemove }) {
-  const [open, setOpen] = useState(null);   // "season|place"
+  const [open, setOpen] = useState(null);   // the place opened
   const [cat, setCat] = useState("all");
   const kinds = MEDAL_CATEGORIES.map((c) => c.key).filter((k) => every.some((m) => m.category === k));
   if (every.some((m) => !m.category)) kinds.push("none");
   const medals = cat === "all" ? every : every.filter((m) => (m.category || "none") === cat);
-  const seasons = [...new Set(medals.map((m) => m.season))].sort(seasonOrder);
-  if (!seasons.length) seasons.push("S1");
+  // One list for every season: season is no longer asked for, so splitting by it says nothing.
+  const seasons = ["all"];
 
   return (
     <>
@@ -6515,13 +6518,13 @@ function MedalBoard({ medals: every, names, canRemove, onRemove }) {
         </div>
       )}
       {seasons.map((season) => {
-    const here = medals.filter((m) => m.season === season);
+    const here = medals;
     return (
       <div key={season} style={{ marginBottom: 20 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9 }}>
           <Blade color={C.gold} h={16} />
           <div className="bx-d" style={{ fontSize: 17, fontWeight: 700 }}>
-            {season} Regular Tournament Podium List
+            Tournament Podium List
           </div>
         </div>
         {PLACES.map((place) => {
@@ -7459,13 +7462,14 @@ export default function App() {
           onClose={() => { setSheet(null); setBladerVersion((v) => v + 1); countWaiting(); }} />
       )}
       {sheet === "bladers" && (
-        <BladersSheet key={bladerVersion} onOpen={setViewBlader} onClose={() => setSheet(null)} />
+        <BladersSheet key={bladerVersion} onOpen={setViewBlader} onClose={() => setSheet(null)}
+          meId={session ? session.user.id : null} onEdit={(b) => setEditing(b)} />
       )}
       {viewBlader && (
         <BladerSheet key={`${viewBlader}:${bladerVersion}`} id={viewBlader}
           meId={session ? session.user.id : null}
           canAward={awarder} isStaff={!!(profile && profile.is_staff)}
-          onClose={() => setViewBlader(null)} onEdit={() => setEditing(true)}
+          onClose={() => setViewBlader(null)} onEdit={(b) => setEditing(b || true)}
           onAward={setAwarding}
           onClaim={(b, n) => setClaiming({ blader: b, waiting: n })}
           onOpenEvent={(eid) => { setViewBlader(null); setSheet(null); openEvent(eid); }} />
@@ -7480,8 +7484,8 @@ export default function App() {
           onClose={() => setClaiming(null)}
           onSaved={() => { setClaiming(null); setBladerVersion((v) => v + 1); }} />
       )}
-      {editing && me && session && (
-        <ProfileEditSheet meId={session.user.id} blader={me}
+      {editing && session && (editing !== true || me) && (
+        <ProfileEditSheet meId={session.user.id} blader={editing === true ? me : editing}
           onClose={() => setEditing(false)}
           onSaved={(row) => {
             setMe(row);
