@@ -13,8 +13,12 @@
  *   https://beyblade.wiki/beyblade-x-list/
  *
  * This is a suggestion list, not a gate: any part box also takes a name typed
- * in, so a part missing here never stops a deck from being entered. When new
- * parts come out, add them to the right list below - nothing else changes.
+ * in, so a part missing here never stops a deck from being entered.
+ *
+ * The catalogue now lives in the database (supabase/parts-schema.sql) and is
+ * edited from the app's Parts screen. These lists are the built-in fallback,
+ * used until the database copy loads and whenever it cannot be reached;
+ * setCatalogue() swaps the database copy in.
  *
  * Abbreviations are the letters used in a combo's written name, as in
  * "Dran Sword 3-60F" or "Bahamut Blitz BK1-50I".
@@ -24,7 +28,7 @@
  * Basic Line (BX) and Unique Line (UX) blades: blade, ratchet, bit. Dran
  * Strike is Basic Line Infinity, which keeps its ratchet, so it is here.
  */
-export const BLADES = [
+export let BLADES = [
   // Basic Line
   "Black Shell", "Cobalt Dragoon", "Cobalt Drake", "Crimson Garuda", "Dran Dagger",
   "Dran Strike", "Dran Sword", "Dranzer Spiral", "Hells Chain", "Hells Scythe", "Knight Lance",
@@ -40,7 +44,7 @@ export const BLADES = [
 ];
 
 /* Unique Line Infinity blades (UX-19, UX-20): blade and bit, no ratchet. */
-export const INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
+export let INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
 
 /*
  * Custom Line lock chips, Infinity included
@@ -48,7 +52,7 @@ export const INFINITY_BLADES = ["Bullet Griffon", "Glory Valkyrie"];
  * deck, but only one of the metal ones - Emperor, or Valkyrie from Valkyrie
  * Volt - may be in a deck at all.
  */
-export const LOCK_CHIPS = [
+export let LOCK_CHIPS = [
   { name: "Bahamut" }, { name: "Brachio" }, { name: "Cerberus" }, { name: "Dran" },
   { name: "Emperor", metal: true }, { name: "Fox" }, { name: "Hells" }, { name: "Knight" },
   { name: "Pegasus" }, { name: "Perseus" }, { name: "Ragna" }, { name: "Rhino" },
@@ -57,7 +61,7 @@ export const LOCK_CHIPS = [
 ];
 
 /* Custom Line (CX) main blades: lock chip, main blade, assist blade, ratchet, bit. */
-export const MAIN_BLADES = [
+export let MAIN_BLADES = [
   "Arc", "Blast", "Brave", "Brush", "Dark", "Eclipse", "Flame", "Hunt", "Might", "Reaper", "Volt",
 ];
 
@@ -66,16 +70,16 @@ export const MAIN_BLADES = [
  * with an over blade. Not on any of the lists; taken from the product names
  * CX-13 to CX-18 and confirmed by hand (CX-13 is Blitz, not "Bliz").
  */
-export const METAL_BLADES = ["Blitz", "Delta", "Fortress", "Rage", "Whip"];
+export let METAL_BLADES = ["Blitz", "Delta", "Fortress", "Rage", "Whip"];
 
 /* Custom Line Infinity over blades. */
-export const OVER_BLADES = [
+export let OVER_BLADES = [
   { name: "Break", abbr: "B" }, { name: "Flow", abbr: "F" }, { name: "Guard", abbr: "G" },
   { name: "Outer", abbr: "O" }, { name: "Peak", abbr: "P" },
 ];
 
 /* Custom Line assist blades, Infinity included. Brachio Whip's W is Wheel. */
-export const ASSIST_BLADES = [
+export let ASSIST_BLADES = [
   { name: "Assault", abbr: "A" }, { name: "Bumper", abbr: "B" }, { name: "Charge", abbr: "C" },
   { name: "Dual", abbr: "D" }, { name: "Erase", abbr: "E" }, { name: "Free", abbr: "F" },
   { name: "Heavy", abbr: "H" }, { name: "Jaggy", abbr: "J" }, { name: "Knuckle", abbr: "K" },
@@ -84,7 +88,7 @@ export const ASSIST_BLADES = [
 ];
 
 /* Ratchets fit every line that has one. */
-export const RATCHETS = [
+export let RATCHETS = [
   "0-60", "0-70", "0-80", "1-50", "1-60", "1-70", "1-80", "2-60", "2-70", "2-80",
   "3-60", "3-70", "3-80", "3-85", "4-50", "4-55", "4-60", "4-70", "4-80", "5-60",
   "5-70", "5-80", "6-60", "6-70", "6-80", "7-55", "7-60", "7-80", "8-70", "9-60",
@@ -96,7 +100,7 @@ export const RATCHETS = [
  * so a combo using it has no separate ratchet: Turbo (CX-07, Pegasus Blast
  * ATr) and Operate. Mark any other fused bit the same way.
  */
-export const BITS = [
+export let BITS = [
   { name: "Accel", abbr: "A" }, { name: "Ball", abbr: "B" }, { name: "Bound Spike", abbr: "BS" },
   { name: "Cyclone", abbr: "C" }, { name: "Disk Ball", abbr: "DB" }, { name: "Elevate", abbr: "E" },
   { name: "Flat", abbr: "F" }, { name: "Free Ball", abbr: "FB" }, { name: "Free Flat", abbr: "FF" },
@@ -114,3 +118,66 @@ export const BITS = [
   { name: "Unite", abbr: "U" }, { name: "Vortex", abbr: "V" }, { name: "Wall Ball", abbr: "WB" },
   { name: "Wedge", abbr: "W" }, { name: "Yielding", abbr: "Y" }, { name: "Zap", abbr: "Z" },
 ];
+
+/* ------------------------------------------------------------ the catalogue */
+
+/** The kinds of part, as the database names them, and the list each fills. */
+export const PART_KINDS = [
+  { key: "blade", label: "Blades", hint: "Basic and Unique Line" },
+  { key: "infinity_blade", label: "Infinity Blades", hint: "Unique Line Infinity" },
+  { key: "lock_chip", label: "Lock Chips", hint: "Custom Line" },
+  { key: "main_blade", label: "Main Blades", hint: "Custom Line" },
+  { key: "metal_blade", label: "Metal Blades", hint: "Custom Line Infinity" },
+  { key: "over_blade", label: "Over Blades", hint: "Custom Line Infinity", abbr: true },
+  { key: "assist_blade", label: "Assist Blades", hint: "Custom Line", abbr: true },
+  { key: "ratchet", label: "Ratchets" },
+  { key: "bit", label: "Bits", abbr: true },
+];
+
+const asPart = (x) => (typeof x === "string" ? { name: x } : x);
+const BUILT_IN = {
+  blade: BLADES, infinity_blade: INFINITY_BLADES, lock_chip: LOCK_CHIPS, main_blade: MAIN_BLADES,
+  metal_blade: METAL_BLADES, over_blade: OVER_BLADES, assist_blade: ASSIST_BLADES, ratchet: RATCHETS, bit: BITS,
+};
+
+function install(byKind) {
+  BLADES = byKind.blade; INFINITY_BLADES = byKind.infinity_blade; LOCK_CHIPS = byKind.lock_chip;
+  MAIN_BLADES = byKind.main_blade; METAL_BLADES = byKind.metal_blade; OVER_BLADES = byKind.over_blade;
+  ASSIST_BLADES = byKind.assist_blade; RATCHETS = byKind.ratchet; BITS = byKind.bit;
+}
+
+/**
+ * Swaps in the catalogue from the database: rows of
+ * { id, kind, name, abbr, fused, metal, aliases, image_path }. Returns false,
+ * and keeps the built-in lists, if there is nothing to swap in.
+ */
+export function setCatalogue(rows) {
+  if (!Array.isArray(rows) || !rows.length) return false;
+  const byKind = Object.fromEntries(PART_KINDS.map((k) => [k.key, []]));
+  rows.forEach((r) => {
+    if (!byKind[r.kind]) return;
+    const part = { id: r.id, name: r.name };
+    if (r.abbr) part.abbr = r.abbr;
+    if (r.fused) part.fused = true;
+    if (r.metal) part.metal = true;
+    if (r.aliases && r.aliases.length) part.aliases = r.aliases;
+    if (r.image_path) part.image = r.image_path;
+    byKind[r.kind].push(part);
+  });
+  Object.values(byKind).forEach((list) =>
+    list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })));
+  install(byKind);
+  return true;
+}
+
+/** Back to the built-in lists. */
+export const resetCatalogue = () => install(BUILT_IN);
+
+/** Every part of one kind in the catalogue now in use, as { name, abbr?, ... }. */
+export function partsOf(kind) {
+  const now = {
+    blade: BLADES, infinity_blade: INFINITY_BLADES, lock_chip: LOCK_CHIPS, main_blade: MAIN_BLADES,
+    metal_blade: METAL_BLADES, over_blade: OVER_BLADES, assist_blade: ASSIST_BLADES, ratchet: RATCHETS, bit: BITS,
+  }[kind] || [];
+  return now.map(asPart);
+}

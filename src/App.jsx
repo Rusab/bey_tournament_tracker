@@ -8,8 +8,9 @@ import {
 import { supabase, arrival } from "./lib/supabase.js";
 import {
   COMBO_TYPES, SLOT_LABEL, deckSize, partOptions, emptyCombo, cleanDeck, comboLabel, deckConflicts,
-  bitHasRatchet,
+  bitHasRatchet, findPart, kindOf,
 } from "./deck.js";
+import { PART_KINDS, setCatalogue, partsOf } from "./parts.js";
 import {
   loadEvent, eventStamp, saveEvent, subscribeEvent,
   currentSession, onAuthChange, loadProfile, signIn, signUp, signOut,
@@ -24,6 +25,8 @@ import {
   removeFromSeries, deleteSeries, seriesRequests,
   CLAIM_LIMIT, myMedalClaims, medalClaimsWaiting, medalClaimCount, submitMedalClaim,
   withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
+  loadParts, amPartsManager, savePart, deletePart, partImageUrl, uploadPartImage, removePartImage,
+  allTournamentDecks,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
 import { renderRankingImage } from "./rankingImage.js";
@@ -276,6 +279,8 @@ const IMAGE_KINDS = {
   avatar: { maxDim: 400, quality: 0.8, alpha: false, prefix: "avatar" },
   // A medal photo has to show the medal clearly enough to check it.
   proof: { maxDim: 1600, quality: 0.82, alpha: false, prefix: "proof" },
+  // A part picture: small, with its transparent background kept.
+  part: { maxDim: 256, quality: 0.9, alpha: true, prefix: "part" },
 };
 
 const EXT = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" };
@@ -7237,6 +7242,404 @@ function MedalApprovals({ rows, refresh }) {
 }
 
 
+/* ================================================================== */
+/*  Parts catalogue                                                    */
+/* ================================================================== */
+
+const partKey = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+function PartThumb({ path, src, size = 40 }) {
+  const url = src || partImageUrl(path);
+  return (
+    <div style={{
+      width: size, height: size, flexShrink: 0, borderRadius: 3, overflow: "hidden",
+      background: C.base, border: `1px solid ${C.line}`, display: "grid", placeItems: "center",
+    }}>
+      {url
+        ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+        : <ImageIcon size={Math.round(size * 0.42)} color={C.line} />}
+    </div>
+  );
+}
+
+/**
+ * Part names typed into decks that the catalogue does not know, with how
+ * many decks use each. Each can be added as a part or merged into one.
+ */
+function unknownNames(events) {
+  const found = new Map();
+  (events || []).forEach((e) => e.players.forEach((pl) => (pl.deck || []).forEach((c) => {
+    const type = COMBO_TYPES[c && c.type] ? c.type : "bx";
+    COMBO_TYPES[type].slots.forEach((slot) => {
+      const v = String(c[slot] || "").trim();
+      if (!v || findPart(slot, v)) return;
+      const kind = kindOf(type, slot);
+      const key = `${kind}|${partKey(v)}`;
+      if (!found.has(key)) found.set(key, { key, kind, name: v, decks: 0, events: new Set() });
+      const f = found.get(key);
+      f.decks += 1; f.events.add(e.name);
+    });
+  })));
+  return [...found.values()].sort((a, b) => b.decks - a.decks || a.name.localeCompare(b.name));
+}
+
+/**
+ * The catalogue, for the account with parts access: add a part the day it
+ * comes out, give it a picture, fix a name, and fold misspellings typed
+ * into decks into the part they meant.
+ */
+function PartsSheet({ onClose, onChanged }) {
+  const [rows, setRows] = useState(undefined);
+  const [view, setView] = useState("catalogue");
+  const [kind, setKind] = useState("blade");
+  const [q, setQ] = useState("");
+  const [editing, setEditing] = useState(null);     // a row, or { kind, name } for a new part
+  const [decks, setDecks] = useState(undefined);    // every tournament's decks, for unknown names
+  const [merging, setMerging] = useState(null);     // an unknown name being merged
+  const [target, setTarget] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const refresh = async () => {
+    const r = await loadParts();
+    setRows(r);
+    if (r) onChanged(r);
+  };
+  useEffect(() => { refresh(); allTournamentDecks().then(setDecks); }, []);
+
+  // Worked out after the catalogue in use has been refreshed, so a merge shows at once.
+  const unknown = useMemo(() => (rows && decks ? unknownNames(decks) : []), [rows, decks]);
+  const kindLabel = (k) => (PART_KINDS.find((x) => x.key === k) || {}).label || k;
+  const shown = (rows || []).filter((r) => r.kind === kind
+    && (!q.trim() || partKey(r.name).includes(partKey(q)) || (r.aliases || []).some((a) => partKey(a).includes(partKey(q)))))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+
+  const merge = async () => {
+    const row = rows.find((r) => r.id === target);
+    if (!row) return;
+    const { error } = await savePart(row.id, { aliases: [...(row.aliases || []), merging.name] });
+    setMerging(null); setTarget("");
+    if (error) { setMsg(error.message); return; }
+    setMsg(`"${merging.name}" now counts as ${row.name}.`);
+    refresh();
+  };
+
+  return (
+    <SheetFrame title="Parts" onClose={onClose}>
+      {rows === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>
+      ) : rows === null ? (
+        <div style={{ color: C.magenta, fontSize: 14, lineHeight: 1.5 }}>
+          The parts catalogue could not be loaded. If this is new, run parts-schema.sql in Supabase.
+        </div>
+      ) : (
+        <>
+          <div style={{ marginBottom: 16 }}>
+            <Segmented value={view} onChange={setView} tone={C.cyan} options={[
+              { value: "catalogue", label: `Catalogue (${rows.length})` },
+              { value: "unknown", label: `Unknown names${decks ? ` (${unknown.length})` : ""}` },
+            ]} />
+          </div>
+          {msg && <div style={{ color: C.green, fontSize: 13.5, marginBottom: 12 }}>{msg}</div>}
+
+          {view === "catalogue" ? (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
+                {PART_KINDS.map((k) => {
+                  const on = k.key === kind;
+                  const n = rows.filter((r) => r.kind === k.key).length;
+                  return (
+                    <button key={k.key} onClick={() => setKind(k.key)} className="bx-d" style={{
+                      padding: "7px 10px", borderRadius: 3, fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+                      background: on ? C.cyan : C.base, color: on ? "#14020A" : C.muted,
+                      border: `1px solid ${on ? C.cyan : C.line}`,
+                    }}>{k.label} <span style={{ fontWeight: 500 }}>{n}</span></button>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <Search size={15} color={C.muted} style={{ position: "absolute", left: 12, top: 13 }} />
+                  <input style={{ ...inputStyle, paddingLeft: 34 }} value={q} placeholder={`Search ${kindLabel(kind).toLowerCase()}`}
+                    onChange={(e) => setQ(e.target.value)} />
+                </div>
+                <Btn tone="primary" style={{ flexShrink: 0 }} onClick={() => setEditing({ kind, name: q.trim() })}>
+                  <Plus size={15} />Add
+                </Btn>
+              </div>
+              {shown.length === 0 ? (
+                <div style={{ color: C.muted, fontSize: 14 }}>{q ? "Nothing by that name." : "None yet."}</div>
+              ) : shown.map((r) => (
+                <button key={r.id} onClick={() => setEditing(r)} style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 11, textAlign: "left",
+                  background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3,
+                  padding: "8px 10px", marginBottom: 6, cursor: "pointer", color: C.ink,
+                }}>
+                  <PartThumb path={r.image_path} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                      {r.name}
+                      {r.abbr && <span style={{ fontSize: 11.5, color: C.muted, border: `1px solid ${C.line}`, borderRadius: 3, padding: "0 5px" }}>{r.abbr}</span>}
+                      {r.fused && <span style={{ fontSize: 11.5, color: C.gold }}>fused ratchet</span>}
+                      {r.metal && <span style={{ fontSize: 11.5, color: C.gold }}>metal</span>}
+                    </div>
+                    {(r.aliases || []).length > 0 && (
+                      <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        also {r.aliases.join(", ")}
+                      </div>
+                    )}
+                  </div>
+                  <ChevronRight size={15} color={C.muted} />
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.5, marginBottom: 14, maxWidth: "58ch" }}>
+                Part names typed into decks that the catalogue does not know. Add one as a new part, or
+                merge it into the part it meant so those decks count toward it.
+              </div>
+              {decks === undefined ? (
+                <div style={{ color: C.muted, fontSize: 14 }}>Reading every deck…</div>
+              ) : decks === null ? (
+                <div style={{ color: C.magenta, fontSize: 14 }}>The tournaments could not be read.</div>
+              ) : unknown.length === 0 ? (
+                <div style={{ color: C.muted, fontSize: 14 }}>Every part in every deck is in the catalogue.</div>
+              ) : unknown.map((u) => (
+                <div key={u.key} style={{ ...card, marginBottom: 8 }}>
+                  <div style={{ fontSize: 15, marginBottom: 2 }}>{u.name}</div>
+                  <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 9 }}>
+                    {kindLabel(u.kind)} · {u.decks} deck{u.decks === 1 ? "" : "s"} · {[...u.events].slice(0, 3).join(", ")}
+                    {u.events.size > 3 ? ` and ${u.events.size - 3} more` : ""}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <Btn tone="primary" style={{ padding: "6px 10px" }}
+                      onClick={() => setEditing({ kind: u.kind, name: u.name })}><Plus size={14} />Add as a part</Btn>
+                    <Btn style={{ padding: "6px 10px" }}
+                      onClick={() => { setMerging(u); setTarget(""); }}>Merge into…</Btn>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
+      {editing && (
+        <PartEditor part={editing} onClose={() => setEditing(null)}
+          onSaved={(text) => { setEditing(null); setMsg(text); refresh(); }} />
+      )}
+      {merging && (
+        <div className="bx" style={{
+          position: "fixed", inset: 0, zIndex: 90, background: "#0B0718EE",
+          display: "grid", placeItems: "center", padding: 20,
+        }}>
+          <div style={{ width: "100%", maxWidth: 400, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 4, padding: 20 }}>
+            <h2 className="bx-d" style={{ fontSize: 22, fontWeight: 800, margin: "0 0 8px" }}>Merge "{merging.name}"</h2>
+            <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: "0 0 14px" }}>
+              It becomes another name for the part you choose, and the {merging.decks} deck{merging.decks === 1 ? "" : "s"} using it count toward that part.
+            </p>
+            <select style={{ ...inputStyle, marginBottom: 16 }} value={target} onChange={(e) => setTarget(e.target.value)}>
+              <option value="">Choose a {kindLabel(merging.kind).toLowerCase().replace(/s$/, "")}</option>
+              {rows.filter((r) => r.kind === merging.kind)
+                .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+                .map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn onClick={() => setMerging(null)} tone="ghost" style={{ flex: 1, justifyContent: "center", padding: 12 }}>Cancel</Btn>
+              <Btn onClick={merge} tone="primary" disabled={!target} style={{ flex: 1, justifyContent: "center", padding: 12 }}>Merge</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </SheetFrame>
+  );
+}
+
+/** One part: its name, letters, flags, other names and picture. Nothing is saved until Save. */
+function PartEditor({ part, onClose, onSaved }) {
+  const isNew = !part.id;
+  const [kind, setKind] = useState(part.kind || "blade");
+  const [name, setName] = useState(part.name || "");
+  const [abbr, setAbbr] = useState(part.abbr || "");
+  const [fused, setFused] = useState(!!part.fused);
+  const [metal, setMetal] = useState(!!part.metal);
+  const [aliases, setAliases] = useState(part.aliases || []);
+  const [alias, setAlias] = useState("");
+  const [blob, setBlob] = useState(null);          // a new picture, not yet uploaded
+  const [gone, setGone] = useState(false);         // the current picture, removed
+  const [busy, setBusy] = useState(false);
+  const [askDelete, setAskDelete] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const k = PART_KINDS.find((x) => x.key === kind) || {};
+
+  const preview = useMemo(() => (blob ? URL.createObjectURL(blob) : null), [blob]);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const pick = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const b = await shrinkImage(file, "part");
+      if (!b) throw new Error();
+      setBlob(b); setGone(false); setMsg(null);
+    } catch { setMsg("That picture could not be read. Try a PNG."); }
+  };
+
+  const addAlias = () => {
+    const a = alias.trim();
+    if (!a) return;
+    if (partKey(a) === partKey(name) || aliases.some((x) => partKey(x) === partKey(a))) { setAlias(""); return; }
+    setAliases([...aliases, a]); setAlias("");
+  };
+
+  const save = async () => {
+    const n = name.trim(), ab = abbr.trim();
+    const bad = !n ? "A part needs a name."
+      : n.length > 40 ? "Keep the name to 40 characters."
+      : ab.length > 6 ? "Keep the letters to 6 characters."
+      : aliases.length > 20 ? "Twenty other names at most."
+      : null;
+    if (bad) { setMsg(bad); return; }
+    setBusy(true); setMsg(null);
+    // A renamed part keeps its old name, so decks that used it still count toward it.
+    let names = aliases.filter((a) => partKey(a) !== partKey(n));
+    if (!isNew && partKey(part.name) !== partKey(n) && !names.some((a) => partKey(a) === partKey(part.name))) {
+      names = [...names, part.name];
+    }
+    let uploaded = null;
+    try {
+      if (blob) uploaded = await uploadPartImage(kind, blob);
+    } catch {
+      setBusy(false); setMsg("The picture could not be uploaded."); return;
+    }
+    const old = part.image_path || null;
+    const image = uploaded || (gone ? null : old);
+    const fields = {
+      name: n, abbr: k.abbr && ab ? ab : null, fused: kind === "bit" && fused, metal: kind === "lock_chip" && metal,
+      aliases: names, image_path: image,
+    };
+    const { error } = await savePart(isNew ? null : part.id, isNew ? { kind, ...fields } : fields);
+    if (error) {
+      if (uploaded) removePartImage(uploaded);
+      setBusy(false); setMsg(error.message); return;
+    }
+    if (old && old !== image) removePartImage(old);
+    onSaved(isNew ? `${n} added.` : `${n} saved.`);
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    const { error } = await deletePart(part.id);
+    if (error) { setBusy(false); setAskDelete(false); setMsg(error.message); return; }
+    removePartImage(part.image_path);
+    onSaved(`${part.name} deleted.`);
+  };
+
+  const showing = blob ? preview : gone ? null : partImageUrl(part.image_path);
+
+  return (
+    <SheetFrame title={isNew ? "Add a part" : part.name} onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20 }}>
+        <PartThumb src={showing} size={96} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, alignItems: "flex-start" }}>
+          <label style={{
+            display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer",
+            background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3, padding: "8px 12px", fontSize: 14,
+          }}>
+            <ImageIcon size={15} />{showing ? "Change picture" : "Add picture"}
+            <input type="file" accept="image/png,image/webp,image/jpeg" onChange={pick} style={{ display: "none" }} />
+          </label>
+          {showing && (
+            <button onClick={() => { setBlob(null); setGone(true); }}
+              style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13, padding: 0 }}>
+              Remove picture
+            </button>
+          )}
+          <div style={{ fontSize: 12, color: C.muted }}>A PNG with a transparent background looks best.</div>
+        </div>
+      </div>
+
+      {isNew ? (
+        <Field label="Kind">
+          <select style={inputStyle} value={kind} onChange={(e) => setKind(e.target.value)}>
+            {PART_KINDS.map((x) => <option key={x.key} value={x.key}>{x.label}{x.hint ? ` (${x.hint})` : ""}</option>)}
+          </select>
+        </Field>
+      ) : (
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>{k.label}{k.hint ? ` · ${k.hint}` : ""}</div>
+      )}
+      <Field label="Name" hint={isNew ? null : "Renaming keeps the old name as another name, so decks that used it still count."}>
+        <input style={inputStyle} maxLength={40} value={name} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      {k.abbr && (
+        <Field label="Letters" hint="How it is written in a combo's name: Low Flat is LF, as in Dran Sword 3-60LF.">
+          <input style={inputStyle} maxLength={6} value={abbr} onChange={(e) => setAbbr(e.target.value)} />
+        </Field>
+      )}
+      {kind === "bit" && (
+        <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 18, cursor: "pointer" }}>
+          <input type="checkbox" checked={fused} onChange={(e) => setFused(e.target.checked)}
+            style={{ width: 17, height: 17, accentColor: C.magenta }} />
+          <span style={{ fontSize: 14.5 }}>Comes fused with its own ratchet</span>
+        </label>
+      )}
+      {kind === "lock_chip" && (
+        <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 18, cursor: "pointer" }}>
+          <input type="checkbox" checked={metal} onChange={(e) => setMetal(e.target.checked)}
+            style={{ width: 17, height: 17, accentColor: C.magenta }} />
+          <span style={{ fontSize: 14.5 }}>Metal lock chip (only one allowed per deck)</span>
+        </label>
+      )}
+
+      <div style={{ marginBottom: 18 }}>
+        <div className="bx-d" style={{ fontSize: 15, marginBottom: 7, fontWeight: 600 }}>Other names</div>
+        {aliases.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {aliases.map((a) => (
+              <span key={a} style={{
+                display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13.5, padding: "4px 6px 4px 9px",
+                background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3,
+              }}>
+                {a}
+                <button onClick={() => setAliases(aliases.filter((x) => x !== a))} aria-label={`Remove ${a}`}
+                  style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 0, display: "flex" }}>
+                  <X size={13} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={inputStyle} maxLength={40} value={alias} placeholder="A misspelling or an old name"
+            onChange={(e) => setAlias(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAlias()} />
+          <Btn onClick={addAlias} style={{ flexShrink: 0 }}><Plus size={15} />Add</Btn>
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6, lineHeight: 1.45 }}>
+          A deck that uses any of these names counts toward this part.
+        </div>
+      </div>
+
+      {msg && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn onClick={save} tone="primary" disabled={busy}><Check size={15} />{busy ? "Saving…" : "Save"}</Btn>
+        <Btn onClick={onClose} tone="ghost" disabled={busy}>Cancel</Btn>
+        {!isNew && (
+          <Btn onClick={() => setAskDelete(true)} tone="danger" disabled={busy} style={{ marginLeft: "auto" }}>
+            <Trash2 size={15} />Delete
+          </Btn>
+        )}
+      </div>
+
+      {askDelete && (
+        <Confirm title={`Delete ${part.name}?`}
+          body="Decks that use it keep the name, but it shows under Unknown names until it is added back or merged into another part."
+          confirmLabel="Delete" tone="danger" onConfirm={remove} onClose={() => setAskDelete(false)} />
+      )}
+    </SheetFrame>
+  );
+}
+
 /**
  * The front door. Every live tournament, newest first, gathered under whoever
  * runs it — a visitor arrives here and clicks straight through to a board,
@@ -7245,7 +7648,7 @@ function MedalApprovals({ rows, refresh }) {
  * Signing in is a button in the corner rather than a wall, because almost
  * everyone who opens this is here to watch, not to score.
  */
-function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile, awarder, waiting = 0 }) {
+function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile, awarder, waiting = 0, partsManager, onParts }) {
   const hosted = mine.filter((e) => e.role === "owner");
   const reffed = mine.filter((e) => e.role === "referee");
 
@@ -7359,8 +7762,12 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
                   Signed in · {profile.email}
                 </span>
               )}
+              {(partsManager || profile.is_staff || awarder) && <span style={{ marginLeft: "auto" }} />}
+              {partsManager && (
+                <Btn onClick={onParts} tone="ghost" style={{ padding: "5px 9px", fontSize: 13 }}>Parts</Btn>
+              )}
               {(profile.is_staff || awarder) && (
-                <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13, marginLeft: "auto" }}>
+                <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13 }}>
                   Approvals
                   {waiting > 0 && (
                     <span className="bx-d" style={{
@@ -7473,6 +7880,13 @@ export default function App() {
   const [awarding, setAwarding] = useState(null);      // the blader a medal is being given to
   const [claiming, setClaiming] = useState(null);      // { blader, waiting }: sending your own medal in
   const [waiting, setWaiting] = useState(0);           // hosts and medals waiting on this account
+  const [partsManager, setPartsManager] = useState(false);
+  const [, setPartsVersion] = useState(0);             // bumped when the catalogue in use changes
+  const useParts = (rows) => { if (setCatalogue(rows)) setPartsVersion((v) => v + 1); };
+
+  // The catalogue from the database, for everyone. Until it arrives, or if
+  // it cannot, the built-in list in parts.js stands in.
+  useEffect(() => { loadParts().then(useParts); }, []);
 
   useEffect(() => {
     currentSession().then(setSession);
@@ -7487,13 +7901,14 @@ export default function App() {
   useEffect(() => { publicEvents().then(setDirectory); }, []);
 
   useEffect(() => {
-    if (!session) { setProfile(null); setEvents([]); setMe(null); setAwarder(false); return; }
+    if (!session) { setProfile(null); setEvents([]); setMe(null); setAwarder(false); setPartsManager(false); return; }
     // The blader row is made by ensure_profile, which loadProfile runs, so it
     // is only asked for once that has finished.
     loadProfile(session.user.id).then((p) => {
       setProfile(p);
       loadBlader(session.user.id).then(setMe);
       amAwarder().then(setAwarder);
+      amPartsManager().then(setPartsManager);
     });
     myEvents(session.user.id).then(setEvents);
     setSigningIn(false);
@@ -7610,9 +8025,13 @@ export default function App() {
         onNew={() => setMaking(true)}
         onApprovals={() => setSheet("approvals")}
         awarder={awarder} waiting={waiting}
+        partsManager={partsManager} onParts={() => setSheet("parts")}
         onSignIn={() => setSigningIn(true)}
         onSignOut={async () => { await signOut(); setOpenId(null); }}
       />
+      {sheet === "parts" && partsManager && (
+        <PartsSheet onClose={() => setSheet(null)} onChanged={useParts} />
+      )}
       {sheet === "approvals" && (
         <ApprovalsSheet isStaff={isStaff} isAwarder={awarder}
           onClose={() => { setSheet(null); setBladerVersion((v) => v + 1); countWaiting(); }} />

@@ -589,6 +589,75 @@ export async function proofLinks(paths) {
   return out;
 }
 
+/* -------------------------------------------------------------------- parts */
+
+/*
+ * The parts catalogue. Everyone reads it; only the account given parts
+ * access changes it. Pictures are public, in their own bucket.
+ */
+
+const PART_COLS = "id, kind, name, abbr, fused, metal, aliases, image_path, updated_at";
+const PART_IMAGES = "part-images";
+
+/** Null if it could not be loaded, which includes the parts script not having run. */
+export async function loadParts() {
+  const { data, error } = await supabase.from("parts").select(PART_COLS);
+  if (error) return null;
+  return data || [];
+}
+
+export async function amPartsManager() {
+  const { data, error } = await supabase.rpc("is_parts_manager");
+  if (error) return false;
+  return !!data;
+}
+
+/** A new part when there is no id. No row back with no error means the policy refused it. */
+export async function savePart(id, fields) {
+  const q = id
+    ? supabase.from("parts").update({ ...fields, updated_at: new Date().toISOString() }).eq("id", id)
+    : supabase.from("parts").insert(fields);
+  const { data, error } = await q.select(PART_COLS).maybeSingle();
+  if (error) {
+    return { error: error.code === "23505" ? new Error("There is already a part by that name.") : error };
+  }
+  if (!data) return { error: new Error("That part could not be saved.") };
+  return { row: data };
+}
+
+export async function deletePart(id) {
+  const { data, error } = await supabase.from("parts").delete().eq("id", id).select("id");
+  if (error) return { error };
+  if (!data || !data.length) return { error: new Error("That part could not be deleted.") };
+  return {};
+}
+
+export const partImageUrl = (path) =>
+  path ? supabase.storage.from(PART_IMAGES).getPublicUrl(path).data.publicUrl : null;
+
+export async function uploadPartImage(kind, blob) {
+  const ext = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" }[blob.type] || "bin";
+  const path = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await supabase.storage
+    .from(PART_IMAGES).upload(path, blob, { contentType: blob.type, cacheControl: "31536000" });
+  if (error) throw error;
+  return path;
+}
+
+export async function removePartImage(path) {
+  if (path) await supabase.storage.from(PART_IMAGES).remove([path]);
+}
+
+/** Every tournament's players, for finding part names typed into decks. */
+export async function allTournamentDecks() {
+  const { data, error } = await supabase.from("events").select("id, name, data");
+  if (error) { console.error(error); return null; }
+  return (data || []).map((e) => ({
+    id: e.id, name: e.name,
+    players: ((e.data && e.data.players) || []).filter((p) => p.deck && p.deck.length),
+  }));
+}
+
 /* -------------------------------------------------------------------- staff */
 
 export async function pendingHosts() {

@@ -60,15 +60,34 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
 /**
  * A typed part as the catalogue names it, if it is in the catalogue - so
- * "lf", "Low flat" and "LOW FLAT" all become "Low Flat". A name the catalogue
- * does not know is kept as typed, trimmed.
+ * "lf", "Low flat" and "LOW FLAT" all become "Low Flat", and so does any
+ * alias the catalogue gives it: a misspelling merged in, or the name it had
+ * before it was renamed. A name the catalogue does not know is kept as
+ * typed, trimmed.
  */
 export function canonicalPart(slot, value) {
   const v = String(value || "").trim();
   if (!v) return "";
-  const n = norm(v);
-  const hit = allOf(slot).find((p) => norm(p.name) === n || (p.abbr && norm(p.abbr) === n));
+  const hit = findPart(slot, v);
   return hit ? hit.name : v;
+}
+
+/** The catalogue entry a typed name means, or null if it is not in the catalogue. */
+export function findPart(slot, value) {
+  const n = norm(value);
+  if (!n) return null;
+  const list = allOf(slot);
+  return list.find((p) => norm(p.name) === n)
+    || list.find((p) => (p.aliases || []).some((a) => norm(a) === n))
+    || list.find((p) => p.abbr && norm(p.abbr) === n)
+    || null;
+}
+
+/** Which kind of catalogue part fills a slot of a combo of this type. */
+export function kindOf(type, slot) {
+  if (slot === "blade") return type === "inf" ? "infinity_blade" : "blade";
+  if (slot === "main") return type === "cxi" ? "metal_blade" : "main_blade";
+  return { lock: "lock_chip", over: "over_blade", assist: "assist_blade", ratchet: "ratchet", bit: "bit" }[slot] || null;
 }
 
 const abbrOf = (slot, name) => {

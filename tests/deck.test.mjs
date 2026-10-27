@@ -112,8 +112,10 @@ const dupes = (list) => {
   const n = list.map((x) => (typeof x === "string" ? x : x.name).toLowerCase());
   return n.filter((x, i) => n.indexOf(x) !== i);
 };
-for (const [name, list] of Object.entries(P)) {
-  check(`no name listed twice in ${name}`, dupes(list), []);
+const LISTS = ["BLADES", "INFINITY_BLADES", "LOCK_CHIPS", "MAIN_BLADES", "METAL_BLADES",
+  "OVER_BLADES", "ASSIST_BLADES", "RATCHETS", "BITS"];
+for (const name of LISTS) {
+  check(`no name listed twice in ${name}`, dupes(P[name]), []);
 }
 for (const [name, list] of [["OVER_BLADES", P.OVER_BLADES], ["ASSIST_BLADES", P.ASSIST_BLADES], ["BITS", P.BITS]]) {
   const a = list.map((x) => x.abbr.toLowerCase());
