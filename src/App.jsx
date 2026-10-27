@@ -4225,8 +4225,9 @@ const partPicture = (slot, name) => {
 };
 
 /**
- * A deck as pictures and words: each beyblade's written name, then every
- * part in it with its picture. A part with no picture still shows its name.
+ * A deck: each beyblade's written name, with its parts' pictures side by
+ * side underneath. The name already says what they are, so the pictures
+ * carry no labels; a part with no picture yet shows its name instead.
  */
 function DeckView({ deck, compact = false }) {
   return (deck || []).map((c, i) => {
@@ -4242,19 +4243,19 @@ function DeckView({ deck, compact = false }) {
           <span className="bx-d" style={{ flex: 1, fontSize: compact ? 14.5 : 16, fontWeight: 700 }}>{comboLabel(c)}</span>
           <span style={{ fontSize: 11.5, color: C.muted }}>{COMBO_TYPES[type].label}</span>
         </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingLeft: 26 }}>
-          {parts.map((slot) => (
-            <div key={slot} title={SLOT_LABEL[slot]} style={{
-              display: "flex", alignItems: "center", gap: 6, background: C.base, border: `1px solid ${C.line}`,
-              borderRadius: 3, padding: "3px 8px 3px 3px",
-            }}>
-              <PartThumb path={partPicture(slot, c[slot])} size={compact ? 26 : 34} />
-              <div style={{ lineHeight: 1.15 }}>
-                <div style={{ fontSize: 10.5, color: C.muted }}>{SLOT_LABEL[slot]}</div>
-                <div style={{ fontSize: compact ? 12.5 : 13.5 }}>{c[slot]}</div>
-              </div>
-            </div>
-          ))}
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: compact ? 6 : 10, paddingLeft: 26 }}>
+          {parts.map((slot) => {
+            const pic = partImageUrl(partPicture(slot, c[slot]));
+            const size = compact ? 40 : 56;
+            return pic ? (
+              <img key={slot} src={pic} alt={c[slot]} title={`${SLOT_LABEL[slot]}: ${c[slot]}`}
+                style={{ width: size, height: size, objectFit: "contain" }} />
+            ) : (
+              <span key={slot} title={SLOT_LABEL[slot]} style={{
+                fontSize: 12, color: C.muted, border: `1px dashed ${C.line}`, borderRadius: 3, padding: "3px 7px",
+              }}>{c[slot]}</span>
+            );
+          })}
         </div>
       </div>
     );
@@ -4272,7 +4273,7 @@ function PartInput({ type, slot, value, onChange, invalid }) {
   const options = partOptions(type, slot);
   const shown = (q
     ? options.filter((o) => [o.name, o.abbr, ...(o.aliases || [])].some((x) => x && x.toLowerCase().replace(/[^a-z0-9]/g, "").includes(q)))
-    : options).slice(0, 40);
+    : options);
   const current = partPicture(slot, value);
   return (
     <div style={{ position: "relative" }}>
@@ -4286,7 +4287,7 @@ function PartInput({ type, slot, value, onChange, invalid }) {
       {open && shown.length > 0 && (
         <div style={{
           position: "absolute", left: 45, right: 0, top: "100%", zIndex: 5, marginTop: 3,
-          maxHeight: 264, overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`,
+          maxHeight: "min(420px, 55vh)", overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`,
           borderRadius: 3, boxShadow: "0 8px 24px #0008",
         }}>
           {shown.map((o) => (
@@ -4298,8 +4299,8 @@ function PartInput({ type, slot, value, onChange, invalid }) {
                 background: o.name === value ? `${C.cyan}22` : "none", border: "none",
                 borderBottom: `1px solid ${C.line}55`, color: C.ink, padding: "6px 9px", cursor: "pointer",
               }}>
-              <PartThumb path={o.image} size={34} />
-              <span style={{ flex: 1, fontSize: 14 }}>{o.name}</span>
+              <PartThumb path={o.image} size={44} />
+              <span style={{ flex: 1, fontSize: 14.5 }}>{o.name}</span>
               {o.abbr && <span style={{ fontSize: 12, color: C.muted }}>{o.abbr}</span>}
             </button>
           ))}
