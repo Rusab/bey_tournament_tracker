@@ -283,7 +283,14 @@ const EXT = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" };
 /** Downscale and re-encode, preferring WebP for size. */
 async function shrinkImage(file, kind) {
   const k = IMAGE_KINDS[kind];
-  const bitmap = await createImageBitmap(file);
+  // A phone photo decoded at full size can be enough to make a phone close
+  // the tab. Decoding at the width wanted keeps it to a few MB. Only for
+  // medal photos, and only where the browser understands the option.
+  let bitmap = null;
+  if (kind === "proof") {
+    try { bitmap = await createImageBitmap(file, { resizeWidth: k.maxDim, resizeQuality: "high" }); } catch { bitmap = null; }
+  }
+  if (!bitmap) bitmap = await createImageBitmap(file);
   const scale = Math.min(1, k.maxDim / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
   const h = Math.max(1, Math.round(bitmap.height * scale));
@@ -6627,6 +6634,10 @@ function WaitingMedals({ claims, onWithdraw }) {
 function ProofPicker({ label, blob, onPick, onError }) {
   const url = useMemo(() => (blob ? URL.createObjectURL(blob) : null), [blob]);
   useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  const [shooting, setShooting] = useState(false);
+  const fallback = useRef(null);
+  const inPage = typeof navigator !== "undefined" && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+  const openCamera = () => (inPage ? setShooting(true) : fallback.current && fallback.current.click());
   const pick = async (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
@@ -6640,17 +6651,19 @@ function ProofPicker({ label, blob, onPick, onError }) {
     }
   };
   /*
-   * The box opens the camera straight away on a phone (capture), since a
-   * photo of the medal in hand is the point. Most phones then offer no
-   * gallery, so the link under it picks a photo already taken. A computer
-   * ignores capture and opens a file picker either way.
+   * The box opens a camera inside the page. Handing the phone to its own
+   * camera app instead lets Android close the browser to free memory, and
+   * the photo is lost on the way back ("unable to complete previous
+   * operation due to low memory"). Only where the browser has no camera of
+   * its own does the box fall back to the camera app. The link under it
+   * picks a photo already taken.
    */
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
-    <label style={{
+    <button type="button" onClick={openCamera} style={{
       width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
       gap: 6, cursor: "pointer", aspectRatio: "1 / 1", borderRadius: 3, overflow: "hidden", position: "relative",
-      border: `1px dashed ${blob ? C.green : C.line}`, background: C.base, color: C.muted, fontSize: 13,
+      border: `1px dashed ${blob ? C.green : C.line}`, background: C.base, color: C.muted, fontSize: 13, padding: 0,
     }}>
       {url ? (
         <>
@@ -6664,8 +6677,13 @@ function ProofPicker({ label, blob, onPick, onError }) {
         <><Camera size={22} /><span style={{ textAlign: "center", padding: "0 6px" }}>{label}</span>
           <span style={{ fontSize: 11.5 }}>Tap to take a photo</span></>
       )}
-      <input type="file" accept="image/*" capture="environment" onChange={pick} style={{ display: "none" }} />
-    </label>
+    </button>
+    <input ref={fallback} type="file" accept="image/*" capture="environment" onChange={pick} style={{ display: "none" }} />
+    {shooting && (
+      <CameraSheet label={label} onClose={() => setShooting(false)}
+        onShot={(b) => { setShooting(false); onPick(b); }}
+        onFile={(e) => { setShooting(false); pick(e); }} />
+    )}
     <label style={{
       display: "block", textAlign: "center", marginTop: 6, fontSize: 12.5, color: C.cyan, cursor: "pointer",
     }}>
@@ -6673,6 +6691,124 @@ function ProofPicker({ label, blob, onPick, onError }) {
       <input type="file" accept="image/*" onChange={pick} style={{ display: "none" }} />
     </label>
     </div>
+  );
+}
+
+/**
+ * A camera inside the page, so the browser never leaves for the phone's own
+ * camera app. The back camera where there is one; the frame is shrunk to
+ * the medal photo size as it is taken, so nothing full-size is ever held.
+ */
+function CameraSheet({ label, onShot, onClose, onFile }) {
+  const video = useRef(null);
+  const stream = useRef(null);
+  const [state, setState] = useState("starting");   // starting | live | shot | failed
+  const [shot, setShot] = useState(null);
+  const shotUrl = useMemo(() => (shot ? URL.createObjectURL(shot) : null), [shot]);
+  useEffect(() => () => { if (shotUrl) URL.revokeObjectURL(shotUrl); }, [shotUrl]);
+
+  useEffect(() => {
+    let gone = false;
+    (async () => {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1440 } },
+        });
+        if (gone) { s.getTracks().forEach((x) => x.stop()); return; }
+        stream.current = s;
+        video.current.srcObject = s;
+        await video.current.play().catch(() => {});
+        setState("live");
+      } catch {
+        if (!gone) setState("failed");
+      }
+    })();
+    return () => {
+      gone = true;
+      if (stream.current) stream.current.getTracks().forEach((x) => x.stop());
+    };
+  }, []);
+
+  const snap = () => {
+    const v = video.current;
+    if (!v || !v.videoWidth) return;
+    const k = IMAGE_KINDS.proof;
+    const scale = Math.min(1, k.maxDim / Math.max(v.videoWidth, v.videoHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(v.videoWidth * scale);
+    c.height = Math.round(v.videoHeight * scale);
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    c.toBlob((b) => { if (b) { setShot(b); setState("shot"); } }, "image/jpeg", k.quality);
+  };
+
+  const round = {
+    width: 70, height: 70, borderRadius: "50%", border: `4px solid ${C.ink}`, background: `${C.ink}33`,
+    cursor: "pointer", flexShrink: 0,
+  };
+
+  return createPortal(
+    <div className="bx" style={{
+      position: "fixed", inset: 0, zIndex: 96, background: "#000", color: C.ink,
+      display: "flex", flexDirection: "column",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", paddingTop: safeTop("12px"),
+      }}>
+        <button onClick={onClose} aria-label="Close camera"
+          style={{ background: "none", border: "none", color: C.ink, cursor: "pointer", display: "flex", padding: 4 }}>
+          <X size={22} />
+        </button>
+        <div className="bx-d" style={{ fontSize: 18, fontWeight: 700 }}>{label}</div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, position: "relative", display: "grid", placeItems: "center" }}>
+        <video ref={video} playsInline muted autoPlay
+          style={{
+            width: "100%", height: "100%", objectFit: "contain",
+            display: state === "live" ? "block" : "none",
+          }} />
+        {state === "shot" && shotUrl && (
+          <img src={shotUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+        )}
+        {state === "starting" && <div style={{ color: C.muted, fontSize: 14 }}>Opening the camera…</div>}
+        {state === "failed" && (
+          <div style={{ padding: 24, textAlign: "center", maxWidth: 340 }}>
+            <Camera size={30} color={C.muted} />
+            <div style={{ fontSize: 15, margin: "12px 0 6px" }}>The camera could not be opened.</div>
+            <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.5, marginBottom: 16 }}>
+              Allow camera access for this site in your browser settings, or choose a photo you have already taken.
+            </div>
+            <label style={{
+              display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", padding: "10px 14px",
+              background: C.raised, border: `1px solid ${C.line}`, borderRadius: 3, fontSize: 14,
+            }}>
+              <ImageIcon size={15} />Choose a photo
+              <input type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} />
+            </label>
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center", gap: 18,
+        padding: "18px 16px", paddingBottom: "calc(env(safe-area-inset-bottom) + 18px)",
+      }}>
+        {state === "live" && (
+          <button onClick={snap} aria-label="Take photo" style={round} />
+        )}
+        {state === "shot" && (
+          <>
+            <Btn onClick={() => { setShot(null); setState("live"); }} tone="ghost"
+              style={{ padding: "12px 18px" }}>Retake</Btn>
+            <Btn onClick={() => onShot(shot)} tone="primary" style={{ padding: "12px 18px" }}>
+              <Check size={16} />Use photo
+            </Btn>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
   );
 }
 
