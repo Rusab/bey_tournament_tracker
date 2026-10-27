@@ -6608,7 +6608,7 @@ function WaitingMedals({ claims, onWithdraw }) {
             <div style={{ fontSize: 14.5, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
               {PLACE_LABEL[c.place]} · {c.tournament_name}<CategoryTag category={c.category} />
             </div>
-            <div style={{ fontSize: 12, color: C.muted }}>{c.organiser_name} · {c.season}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>{c.organiser_name}</div>
           </div>
           <button onClick={() => onWithdraw(c)} aria-label="Withdraw"
             style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 4 }}>
@@ -6671,7 +6671,6 @@ function MedalSheet({ blader, directory, onClose, onSaved, claim = false, waitin
   const full = claim && waiting >= CLAIM_LIMIT;
   const [tournament, setTournament] = useState("");
   const [organiser, setOrganiser] = useState("");
-  const [season, setSeason] = useState("S1");
   const [teammate, setTeammate] = useState("");
   const [others, setOthers] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -6691,14 +6690,13 @@ function MedalSheet({ blader, directory, onClose, onSaved, claim = false, waitin
   };
 
   const save = async () => {
-    const t = tournament.trim(), o = organiser.trim(), s = season.trim();
+    // Season is not asked for: every medal is filed under S1, the database default.
+    const t = tournament.trim(), o = organiser.trim(), s = "S1";
     const bad = !category ? "Which kind of tournament was it? Choose a category."
       : !t ? "Which tournament was it?"
       : t.length > 80 ? "Keep the tournament name to 80 characters."
       : !o ? "Who organised it?"
       : o.length > 60 ? "Keep the organiser to 60 characters."
-      : !s ? "Which season?"
-      : s.length > 20 ? "Keep the season to 20 characters."
       : claim && (!front || !back) ? "Add a photo of each side of the medal."
       : null;
     if (bad) { setMsg(bad); return; }
@@ -6753,9 +6751,6 @@ function MedalSheet({ blader, directory, onClose, onSaved, claim = false, waitin
         <input style={inputStyle} maxLength={60} value={organiser} list="medal-organisers"
           onChange={(e) => setOrganiser(e.target.value)} placeholder="Who ran it" />
         <datalist id="medal-organisers">{organisers.map((n) => <option key={n} value={n} />)}</datalist>
-      </Field>
-      <Field label="Season">
-        <input style={inputStyle} maxLength={20} value={season} onChange={(e) => setSeason(e.target.value)} />
       </Field>
       <Field label={claim ? "Teammate" : "Also award to teammate"}
         hint={claim
@@ -7053,7 +7048,7 @@ function MedalApprovals({ rows, refresh }) {
             <CategoryTag category={c.category} />
           </div>
           <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>
-            {c.organiser_name} · {c.season} · sent {new Date(c.created_at).toLocaleDateString()}
+            {c.organiser_name} · sent {new Date(c.created_at).toLocaleDateString()}
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12, maxWidth: 420 }}>
             {photo(c.front_path, "Front")}
