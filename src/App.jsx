@@ -2835,7 +2835,52 @@ function Chip({ children, onClick, active }) {
 /*  Matches                                                            */
 /* ================================================================== */
 
+const MATCH_DECKS_KEY = "bx:matchDecks";
+
+/** Each blader's blades, as pictures: the blade of a BX or UX combo, the main blade of a CX one. */
+function bladesOf(t, pid) {
+  const p = (t.players || []).find((x) => x.id === pid);
+  return ((p && p.deck) || []).map((c) => {
+    const slot = c.type === "cx" || c.type === "cxi" ? "main" : "blade";
+    return c[slot] ? { name: c[slot], url: partImageUrl(partPicture(slot, c[slot])) } : null;
+  }).filter(Boolean);
+}
+
+function DeckToggle({ on, onChange }) {
+  return (
+    <button onClick={() => onChange(!on)} aria-pressed={on} style={{
+      display: "inline-flex", alignItems: "center", gap: 7, background: "none", border: `1px solid ${on ? C.gold : C.line}`,
+      borderRadius: 3, padding: "5px 9px", color: on ? C.gold : C.muted, fontSize: 13, cursor: "pointer",
+    }}>
+      <span style={{
+        width: 26, height: 14, borderRadius: 7, position: "relative", flexShrink: 0,
+        background: on ? C.gold : C.line, transition: "background .15s",
+      }}>
+        <span style={{
+          position: "absolute", top: 2, left: on ? 14 : 2, width: 10, height: 10, borderRadius: "50%",
+          background: C.base, transition: "left .15s",
+        }} />
+      </span>
+      Decks
+    </button>
+  );
+}
+
 function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
+  // Remembered on this device only: a viewer's preference.
+  const [showDecks, setShowDecks] = useState(() => {
+    try { return localStorage.getItem(MATCH_DECKS_KEY) === "1"; } catch (e) { return false; }
+  });
+  const toggleDecks = (v) => {
+    setShowDecks(v);
+    try { localStorage.setItem(MATCH_DECKS_KEY, v ? "1" : "0"); } catch (e) { /* private mode */ }
+  };
+  const anyDeck = (t.players || []).some((p) => p.deck && p.deck.length);
+  const blades = useMemo(() => {
+    if (!showDecks) return null;
+    return Object.fromEntries((t.players || []).map((p) => [p.id, bladesOf(t, p.id)]));
+  }, [showDecks, t]);
+
   if (!t.groupMatches.length) {
     return <EmptyState title="No fixtures yet"
       body="Make the group draw first — fixtures build themselves as soon as bladers are in groups." />;
@@ -2847,6 +2892,11 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
           ? `Everyone plays everyone once, ${stageLine(t, "group")}.`
           : `Everyone plays everyone in their group, ${stageLine(t, "group")}.`)
           + (isAdmin ? " Tap a match to score it." : "")} />
+      {anyDeck && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+          <DeckToggle on={showDecks} onChange={toggleDecks} />
+        </div>
+      )}
       <GroupPicker t={t} value={group} onChange={setGroup} />
       {/* Indexed over every group, not the filtered set, so each keeps its colour. */}
       {t.groups.map((g, gi) => {
@@ -2865,7 +2915,7 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
                 color: done === ms.length ? C.green : C.muted,
               }}>{done}/{ms.length} played</span>
             </div>
-            {ms.map((m) => <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin}
+            {ms.map((m) => <MatchRow key={m.id} m={m} nameOf={nameOf} locked={!isAdmin} blades={blades}
               bestOf={bestOfFor(m, t)} onClick={() => onScore(m.id)} />)}
           </div>
         );
@@ -2875,7 +2925,7 @@ function MatchesView({ t, nameOf, onScore, isAdmin, group, setGroup }) {
 }
 
 /** byePossible: only the opening round, where an empty slot really is a bye. */
-function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pending }) {
+function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pending, blades }) {
   const { s1, s2 } = scoreOf(m);
   const w = winnerOf(m);
   const both = m.p1 && m.p2 && !locked;
@@ -2914,6 +2964,14 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pend
         color: m.p2 ? (w === m.p2 ? C.cyan : C.ink) : C.muted,
       }}>{m.p2 ? nameOf(m.p2) : (m.p1 && byePossible ? "Bye" : (pending ? pending[1] : "TBD"))}</span>
       </div>
+      {blades && (blades[m.p1] || []).length + (blades[m.p2] || []).length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+          {label && <span style={{ width: 28, flexShrink: 0 }} />}
+          <BladeStrip list={blades[m.p1]} />
+          <span style={{ minWidth: 50, flexShrink: 0 }} />
+          <BladeStrip list={blades[m.p2]} right />
+        </div>
+      )}
       {sets && (
         <div style={{
           display: "grid", gap: 4, marginTop: 8,
@@ -2939,6 +2997,21 @@ function MatchRow({ m, nameOf, onClick, label, locked, byePossible, bestOf, pend
         </div>
       )}
     </button>
+  );
+}
+
+/** A blader's blades in one line: small enough that three always fit. */
+function BladeStrip({ list, right }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4, justifyContent: right ? "flex-end" : "flex-start" }}>
+      {(list || []).map((b, i) => (b.url
+        ? <img key={i} src={b.url} alt={b.name} title={b.name}
+            style={{ width: 28, height: 28, objectFit: "contain", flexShrink: 1, minWidth: 0 }} />
+        : <span key={i} title={b.name} style={{
+            width: 28, height: 28, flexShrink: 1, minWidth: 0, borderRadius: "50%", border: `1px dashed ${C.line}`,
+            display: "grid", placeItems: "center", fontSize: 10, color: C.muted, overflow: "hidden",
+          }}>{b.name.slice(0, 2)}</span>))}
+    </div>
   );
 }
 
