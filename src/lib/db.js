@@ -648,14 +648,69 @@ export async function removePartImage(path) {
   if (path) await supabase.storage.from(PART_IMAGES).remove([path]);
 }
 
-/** Every tournament's players, for finding part names typed into decks. */
+/** Every tournament's decks, for finding part names typed into them. */
 export async function allTournamentDecks() {
+  const rows = await supabase.from("event_decks").select("event_id, player_id, deck");
+  if (!rows.error) {
+    const ids = [...new Set(rows.data.map((r) => r.event_id))];
+    const names = ids.length ? await supabase.from("events").select("id, name").in("id", ids) : { data: [] };
+    const nameOf = Object.fromEntries((names.data || []).map((e) => [e.id, e.name]));
+    return ids.map((id) => ({
+      id, name: nameOf[id] || "A tournament",
+      players: rows.data.filter((r) => r.event_id === id).map((r) => ({ id: r.player_id, deck: r.deck })),
+    }));
+  }
+  // Before decks-schema.sql has run, decks are still in the tournament data.
   const { data, error } = await supabase.from("events").select("id, name, data");
   if (error) { console.error(error); return null; }
   return (data || []).map((e) => ({
     id: e.id, name: e.name,
     players: ((e.data && e.data.players) || []).filter((p) => p.deck && p.deck.length),
   }));
+}
+
+/* -------------------------------------------------------------------- decks */
+
+/*
+ * Decks live in their own table, and the database decides who sees one:
+ * the tournament's organisers and the linked blader always, everyone else
+ * once a match has been scored. Null back means the table is not there
+ * yet, and decks are still kept in the tournament data.
+ */
+
+/** { playerId: deck } for one tournament, holding only the decks this account may see. */
+export async function loadDecks(eventId) {
+  const { data, error } = await supabase.from("event_decks").select("player_id, deck").eq("event_id", eventId);
+  if (error) return null;
+  return Object.fromEntries((data || []).map((r) => [r.player_id, r.deck]));
+}
+
+/** { eventId: { playerId: deck } } for several tournaments. */
+export async function decksForEvents(eventIds) {
+  if (!eventIds.length) return {};
+  const { data, error } = await supabase.from("event_decks").select("event_id, player_id, deck").in("event_id", eventIds);
+  if (error) return null;
+  const out = {};
+  (data || []).forEach((r) => { (out[r.event_id] = out[r.event_id] || {})[r.player_id] = r.deck; });
+  return out;
+}
+
+/** An empty deck removes the row. Refused when the database does not allow this account to change it. */
+export async function saveDeck(eventId, playerId, deck) {
+  if (!deck || !deck.length) {
+    const { error } = await supabase.from("event_decks").delete().eq("event_id", eventId).eq("player_id", playerId);
+    return { error };
+  }
+  const up = await supabase.from("event_decks").update({ deck })
+    .eq("event_id", eventId).eq("player_id", playerId).select("player_id");
+  if (up.error) return { error: up.error };
+  if (up.data && up.data.length) return {};
+  const ins = await supabase.from("event_decks").insert({ event_id: eventId, player_id: playerId, deck });
+  if (ins.error) {
+    return { error: ins.error.code === "42501"
+      ? new Error("This deck can no longer be changed here: the tournament has started.") : ins.error };
+  }
+  return {};
 }
 
 /* -------------------------------------------------------------------- staff */

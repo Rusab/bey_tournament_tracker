@@ -26,7 +26,7 @@ import {
   CLAIM_LIMIT, myMedalClaims, medalClaimsWaiting, medalClaimCount, submitMedalClaim,
   withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
   loadParts, amPartsManager, savePart, deletePart, partImageUrl, uploadPartImage, removePartImage,
-  allTournamentDecks,
+  allTournamentDecks, loadDecks, decksForEvents, saveDeck,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
 import { renderRankingImage } from "./rankingImage.js";
@@ -1602,6 +1602,34 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
     try { localStorage.setItem(BRACKET_VIEW_KEY, v); } catch (e) { /* private mode */ }
   };
   const [detail, setDetail] = useState(null);
+  // Decks this viewer may see, from their own table: undefined while
+  // loading, null when that table is not there yet (decks then still live
+  // in the tournament data). Asked again when the tournament starts, which
+  // is when the public may see them.
+  const [decks, setDecks] = useState(undefined);
+  const started = !!t && tournamentStarted(t);
+  useEffect(() => { loadDecks(eventId).then(setDecks); }, [eventId, started, detail]);
+  const tv = useMemo(() => {
+    if (!t || !decks) return t;
+    return { ...t, players: t.players.map(({ deck, ...p }) => (decks[p.id] ? { ...p, deck: decks[p.id] } : p)) };
+  }, [t, decks]);
+  const saveDeckFor = async (playerId, next) => {
+    if (decks === null) {
+      update((d) => {
+        const q = d.players.find((x) => x.id === playerId);
+        if (q) { if (next.length) q.deck = next; else delete q.deck; }
+        return d;
+      });
+      return {};
+    }
+    const { error } = await saveDeck(eventId, playerId, next);
+    if (!error) setDecks((cur) => {
+      const out = { ...(cur || {}) };
+      if (next.length) out[playerId] = next; else delete out[playerId];
+      return out;
+    });
+    return { error };
+  };
   const [showSetup, setShowSetup] = useState(false);
   const [showFinal, setShowFinal] = useState(false);
   const [live, setLive] = useState(false);
@@ -1910,7 +1938,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
         {/* Keyed on the tab so the entrance animation restarts on every change. */}
         <div key={tab} className={slide === "next" ? "bx-tab-next" : slide === "prev" ? "bx-tab-prev" : undefined}>
           {tab === "groups" && <GroupsView t={t} update={update} check={check} nameOf={nameOf} isAdmin={isAdmin} eventId={eventId} />}
-          {tab === "matches" && <MatchesView t={t} nameOf={nameOf} isAdmin={isAdmin}
+          {tab === "matches" && <MatchesView t={tv} nameOf={nameOf} isAdmin={isAdmin}
             group={group} setGroup={setGroup}
             onScore={(id) => setScoring({ kind: "group", id })} />}
           {tab === "table" && <TableView t={t} nameOf={nameOf} update={update} check={check} isAdmin={isAdmin}
@@ -1969,7 +1997,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           onSave={(value) => saveRound(editRound, value)} />
       )}
       {detail && (
-        <PlayerSheet playerId={detail} t={t} nameOf={nameOf} meId={meId}
+        <PlayerSheet playerId={detail} t={tv} nameOf={nameOf} meId={meId} onSaveDeck={saveDeckFor}
           allMatches={allMatches} onClose={() => setDetail(null)}
           isAdmin={isAdmin} update={update} eventId={eventId} />
       )}
@@ -4262,20 +4290,18 @@ function MatchReview({ checks, onDone, onClose }) {
  * The beyblades a player brought, as the hobby writes them. Anyone can see a
  * deck once it is entered; only whoever runs the tournament can enter it.
  */
-function DeckSection({ t, playerId, canEdit, update }) {
+function DeckSection({ t, playerId, canEdit, onSave, lockedNote }) {
   const [editing, setEditing] = useState(false);
+  const [err, setErr] = useState(null);
   const p = t.players.find((x) => x.id === playerId);
   if (!p) return null;
   const deck = p.deck || [];
   if (!deck.length && !canEdit) return null;
 
-  const save = (next) => {
-    update((d) => {
-      const q = d.players.find((x) => x.id === playerId);
-      if (q) { if (next.length) q.deck = next; else delete q.deck; }
-      return d;
-    });
-    setEditing(false);
+  const save = async (next) => {
+    const { error } = await onSave(playerId, next);
+    if (error) { setErr(error.message || "That deck could not be saved."); return; }
+    setErr(null); setEditing(false);
   };
 
   return (
@@ -4289,6 +4315,12 @@ function DeckSection({ t, playerId, canEdit, update }) {
           </Btn>
         )}
       </div>
+      {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 8 }}>{err}</div>}
+      {lockedNote && (
+        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 8 }}>
+          The tournament has started, so your deck is locked. An organiser can still change it.
+        </div>
+      )}
       {deck.length ? <DeckView deck={deck} /> : (
         <div style={{ color: C.muted, fontSize: 13.5 }}>No deck entered. It is optional.</div>
       )}
@@ -4480,7 +4512,10 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
   );
 }
 
-function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId, meId }) {
+function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update, eventId, meId, onSaveDeck }) {
+  const me = t.players.find((x) => x.id === playerId) || {};
+  // The linked blader enters their own deck, until the tournament starts.
+  const ownDeck = !!meId && (me.profileId === meId || (me.memberIds || []).includes(meId));
   const st = playerStats(playerId, allMatches, t);
   const group = t.groups.find((g) => g.playerIds.includes(playerId));
   const gi = t.groups.findIndex((g) => g.playerIds.includes(playerId));
@@ -4542,8 +4577,10 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
           <Stat label="Against" value={st.pa} />
         </div>
 
-        {(isAdmin || tournamentStarted(t) || (meId && (t.players.find((x) => x.id === playerId) || {}).profileId === meId)) && (
-          <DeckSection t={t} playerId={playerId} canEdit={!!(isAdmin && update)} update={update} />
+        {(isAdmin || tournamentStarted(t) || ownDeck) && (
+          <DeckSection t={t} playerId={playerId} onSave={onSaveDeck}
+            canEdit={!!onSaveDeck && (isAdmin || (ownDeck && !tournamentStarted(t)))}
+            lockedNote={ownDeck && !isAdmin && tournamentStarted(t)} />
         )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
@@ -6546,14 +6583,24 @@ const RESULT_COLOR = { Champion: C.gold, "Runner-up": "#C9CED6", "3rd place": "#
 function Participation({ id, mine, onOpenEvent }) {
   const [rows, setRows] = useState(undefined);
   useEffect(() => {
-    bladerEvents(id).then((evs) => setRows(evs === null ? null : evs
+    bladerEvents(id).then(async (evs) => {
+      if (evs === null) { setRows(null); return; }
+      // Decks come from their own table, which only hands back those this viewer may see.
+      const byEvent = await decksForEvents(evs.map((e) => e.id));
+      setRows(evs
       .map((e) => {
-        const r = participation(e.data || {}, id);
+        const data = e.data || {};
+        const held = byEvent && byEvent[e.id];
+        const withDecks = byEvent
+          ? { ...data, players: (data.players || []).map(({ deck, ...p }) => (held && held[p.id] ? { ...p, deck: held[p.id] } : p)) }
+          : data;
+        const r = participation(withDecks, id);
         // Another blader's deck shows only once that tournament has started.
-        if (r && !mine && !tournamentStarted(e.data || {})) r.deck = null;
+        if (r && !mine && !tournamentStarted(data)) r.deck = null;
         return { e, r };
       })
-      .filter((x) => x.r)));
+      .filter((x) => x.r));
+    });
   }, [id]);
 
   if (rows === undefined) return <div style={{ color: C.muted, fontSize: 14 }}>Loading tournaments…</div>;

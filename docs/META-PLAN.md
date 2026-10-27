@@ -40,7 +40,7 @@ different angles. The Parts screen can grow a photo set per part later.
 - An `official` flag on each tournament. Only you can set or clear it.
 - Shown as an **Official** badge on the tournament list and the scoreboard.
 
-## Phase 3 — decks entered by bladers
+## Phase 3 — decks entered by bladers (built)
 
 - A blader linked to a player in a tournament can enter or change that deck.
 - Organisers (host and referees) can change any deck at any time.
