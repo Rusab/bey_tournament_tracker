@@ -821,3 +821,75 @@ export async function metaEvents() {
   const decks = (await decksForEvents((data || []).map((e) => e.id))) || {};
   return (data || []).map((e) => ({ ...e, decks: decks[e.id] || {} }));
 }
+
+/* ------------------------------------------------------------------- legacy */
+
+/*
+ * Tournaments played outside the app: a name, a date, an organiser, and
+ * the podium with each place's deck. Added by an account with medal
+ * access; each blader on the podium may change their own deck.
+ */
+
+const LEGACY_COLS = "id, name, organiser, played_on, format, created_at, "
+  + "legacy_places(id, place, name, blader_id, teammate_id, deck)";
+
+/** Newest first. Null if they could not be loaded (legacy-schema.sql not run). */
+export async function listLegacy() {
+  const { data, error } = await supabase.from("legacy_events").select(LEGACY_COLS)
+    .order("played_on", { ascending: false, nullsFirst: false }).order("created_at", { ascending: false });
+  if (error) { console.error(error); return null; }
+  return (data || []).map((e) => ({
+    ...e, places: [...(e.legacy_places || [])].sort((a, b) => a.place - b.place || a.name.localeCompare(b.name)),
+  }));
+}
+
+/**
+ * Saves a legacy tournament and its podium. places: [{ id?, place, name,
+ * blader_id, teammate_id }]. Places with an id are updated (their decks are
+ * kept), new ones added, and ones no longer listed removed.
+ */
+export async function saveLegacy(id, fields, places, before = []) {
+  const ev = id
+    ? await supabase.from("legacy_events").update(fields).eq("id", id).select("id").maybeSingle()
+    : await supabase.from("legacy_events").insert(fields).select("id").maybeSingle();
+  if (ev.error) return { error: ev.error };
+  if (!ev.data) return { error: new Error("That tournament could not be saved.") };
+  const eventId = ev.data.id;
+  const keep = new Set(places.filter((p) => p.id).map((p) => p.id));
+  const gone = before.filter((p) => !keep.has(p.id)).map((p) => p.id);
+  if (gone.length) {
+    const del = await supabase.from("legacy_places").delete().in("id", gone);
+    if (del.error) return { error: del.error };
+  }
+  for (const p of places) {
+    const row = { place: p.place, name: p.name, blader_id: p.blader_id || null, teammate_id: p.teammate_id || null };
+    const res = p.id
+      ? await supabase.from("legacy_places").update(row).eq("id", p.id)
+      : await supabase.from("legacy_places").insert({ ...row, event_id: eventId });
+    if (res.error) return { error: res.error };
+  }
+  return { id: eventId };
+}
+
+export async function deleteLegacy(id) {
+  const { data, error } = await supabase.from("legacy_events").delete().eq("id", id).select("id");
+  if (error) return { error };
+  if (!data || !data.length) return { error: new Error("That tournament could not be removed.") };
+  return {};
+}
+
+/** An empty deck clears it. No row back means the database refused. */
+export async function saveLegacyDeck(placeId, deck) {
+  const { data, error } = await supabase.from("legacy_places")
+    .update({ deck: deck && deck.length ? deck : null }).eq("id", placeId).select("id");
+  if (error) return { error };
+  if (!data || !data.length) return { error: new Error("This deck can only be changed by the blader or the medal manager.") };
+  return {};
+}
+
+/** Every legacy podium place with a deck, for the meta table. Empty if none or not set up. */
+export async function legacyDecks() {
+  const { data, error } = await supabase.from("legacy_places")
+    .select("id, event_id, place, deck").not("deck", "is", null);
+  return error ? [] : data || [];
+}

@@ -28,7 +28,8 @@ import {
   withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
   loadParts, amPartsManager, savePart, deletePart, partImageUrl, uploadPartImage, removePartImage,
   allTournamentDecks, loadDecks, decksForEvents, saveDeck,
-  metaEvents, matchParts, refCounts, replaceCatalogueRefs, submitDeckPhoto, deckPhotosWaiting, deckPhotoCount,
+  metaEvents, listLegacy, saveLegacy, deleteLegacy, saveLegacyDeck, legacyDecks,
+  matchParts, refCounts, replaceCatalogueRefs, submitDeckPhoto, deckPhotosWaiting, deckPhotoCount,
   reviewDeckPhoto, deckPhotoLinks,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
@@ -8700,7 +8701,7 @@ function metaEntries(t, decks, eventId) {
   }));
 }
 
-const PODIUM_COLORS = { first: "#F2C14E", second: "#C3CBD6", third: "#C98A55" };
+const PODIUM_COLORS = { first: PLACE_COLOR.first, second: PLACE_COLOR.second, third: PLACE_COLOR.third };
 const pctOf = (x) => `${Math.round(x * 100)}%`;
 
 /** A row's numbers: podium places as coloured counts, then decks, top cut and record. */
@@ -8757,9 +8758,13 @@ function MetaSheet({ onClose }) {
   const [q, setQ] = useState("");
 
   useEffect(() => {
-    metaEvents().then((evs) => {
+    Promise.all([metaEvents(), legacyDecks()]).then(([evs, legacy]) => {
       if (!evs) { setTable(null); return; }
-      setTable(metaTable(evs.flatMap((e) => metaEntries(e.data, e.decks, e.id))));
+      // A legacy podium place: a podium finish and a top cut, with no matches on record.
+      const old = legacy.map((p) => ({
+        eventId: `legacy:${p.event_id}`, deck: p.deck, place: p.place, topCut: true, wins: 0, losses: 0,
+      }));
+      setTable(metaTable([...evs.flatMap((e) => metaEntries(e.data, e.decks, e.id)), ...old]));
     });
   }, []);
 
@@ -8778,6 +8783,7 @@ function MetaSheet({ onClose }) {
           <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 14, maxWidth: "62ch" }}>
             From {table.decks} deck{table.decks === 1 ? "" : "s"} in {table.events} tournament{table.events === 1 ? "" : "s"}.
             A podium, a top cut or a match counts for every blade and combo in the deck that earned it.
+            Legacy tournaments count their podium decks.
             Win rates show once {MIN_DECKS} decks stand behind them.
           </div>
           <div style={{ marginBottom: 10 }}>
@@ -8846,7 +8852,285 @@ function MetaSheet({ onClose }) {
   );
 }
 
+/* ---- legacy tournaments ---- */
+
+// The medal colours, by place number.
+const PODIUM_LABEL = { 1: "1st", 2: "2nd", 3: "3rd" };
+const PODIUM_COLOR = { 1: PLACE_COLOR.first, 2: PLACE_COLOR.second, 3: PLACE_COLOR.third };
+
+/** Each beyblade's blade picture in a deck: the blade, or a custom line's main blade. */
+const deckBlades = (deck) => (deck || []).map((c) => {
+  const slot = c.type === "cx" || c.type === "cxi" ? "main" : "blade";
+  return c[slot] ? { name: c[slot], url: partImageUrl(partPicture(slot, c[slot])) } : null;
+}).filter(Boolean);
+
+const legacyDate = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : null);
+
+/**
+ * Tournaments played outside the app, newest first, each with its podium.
+ * Each podium place shows its deck; the blader in that place (or both, in a
+ * tag team) and the medal manager can add or change it at any time.
+ */
+function LegacyList({ awarder, meId }) {
+  const [rows, setRows] = useState(undefined);
+  const [names, setNames] = useState({});
+  const [editing, setEditing] = useState(null);     // a tournament, or {} for a new one
+  const [deckFor, setDeckFor] = useState(null);     // { event, place }
+  const [open, setOpen] = useState(null);           // the podium place whose deck is shown
+  const [err, setErr] = useState(null);
+
+  const load = () => listLegacy().then((r) => {
+    setRows(r);
+    if (r) bladerNames(r.flatMap((e) => e.places.flatMap((p) => [p.blader_id, p.teammate_id]))).then(setNames);
+  });
+  useEffect(() => { load(); }, []);
+
+  const saveDeck = async (deck) => {
+    const { error } = await saveLegacyDeck(deckFor.place.id, deck);
+    if (error) { setErr(error.message); return; }
+    setErr(null); setDeckFor(null); load();
+  };
+
+  if (rows === undefined) return <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>;
+  if (rows === null) {
+    return (
+      <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>
+        Legacy tournaments are not set up yet{awarder ? ": run legacy-schema.sql in Supabase" : ""}.
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 14, maxWidth: "60ch" }}>
+        Tournaments played before the app, with their podiums. Bladers on a podium can add the deck they used;
+        those decks count on the Meta page.
+      </div>
+      {awarder && (
+        <Btn onClick={() => setEditing({})} style={{ marginBottom: 16 }}>
+          <Plus size={15} />Add a legacy tournament
+        </Btn>
+      )}
+      {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>{err}</div>}
+      {rows.length === 0 && (
+        <div style={{ ...card, textAlign: "center", padding: "30px 20px", color: C.muted, fontSize: 14 }}>
+          No legacy tournaments yet.
+        </div>
+      )}
+
+      {rows.map((e) => (
+        <div key={e.id} style={{ ...card, marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+            <Trophy size={18} color={C.gold} style={{ flexShrink: 0, marginTop: 3 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="bx-d" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.15 }}>{e.name}</div>
+              <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>
+                {[legacyDate(e.played_on), e.organiser, e.format === "tag" ? "Tag team" : null].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            {awarder && (
+              <Btn tone="ghost" style={{ padding: "5px 9px", fontSize: 13 }} onClick={() => setEditing(e)}>
+                <Pencil size={13} />Edit
+              </Btn>
+            )}
+          </div>
+
+          {e.places.map((p) => {
+            const mine = !!meId && (p.blader_id === meId || p.teammate_id === meId);
+            const canEdit = awarder || mine;
+            const isOpen = open === p.id;
+            const members = e.format === "tag" ? [p.blader_id, p.teammate_id].filter(Boolean).map((id) => names[id]).filter(Boolean) : [];
+            return (
+              <div key={p.id} style={{ borderTop: `1px solid ${C.line}55`, padding: "8px 0" }}>
+                <div onClick={() => p.deck && setOpen(isOpen ? null : p.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 9, cursor: p.deck ? "pointer" : "default" }}>
+                  <span className="bx-d" style={{
+                    minWidth: 38, textAlign: "center", fontSize: 13, fontWeight: 800, padding: "3px 6px", borderRadius: 3,
+                    background: `${PODIUM_COLOR[p.place]}22`, color: PODIUM_COLOR[p.place], border: `1px solid ${PODIUM_COLOR[p.place]}66`,
+                  }}>{PODIUM_LABEL[p.place]}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.name}{p.blader_id && <Link2 size={12} color={C.cyan} style={{ marginLeft: 5, verticalAlign: "-1px" }} />}
+                    </div>
+                    {members.length > 0 && <div style={{ fontSize: 12, color: C.muted }}>{members.join(" · ")}</div>}
+                  </div>
+                  {p.deck
+                    ? <div style={{ maxWidth: "40%" }}><BladeStrip list={deckBlades(p.deck)} right /></div>
+                    : <span style={{ fontSize: 12, color: C.line }}>No deck</span>}
+                  {canEdit && (
+                    <button onClick={(ev) => { ev.stopPropagation(); setDeckFor({ event: e, place: p }); }}
+                      title={p.deck ? "Edit deck" : "Add deck"} aria-label={p.deck ? "Edit deck" : "Add deck"} style={{
+                        background: "none", border: `1px solid ${C.line}`, borderRadius: 3, color: mine ? C.cyan : C.muted,
+                        cursor: "pointer", display: "flex", alignItems: "center", gap: 4, padding: "4px 7px", fontSize: 12,
+                      }}>
+                      {p.deck ? <Pencil size={12} /> : <Plus size={12} />}Deck
+                    </button>
+                  )}
+                </div>
+                {isOpen && p.deck && <div style={{ marginTop: 8 }}><DeckView deck={p.deck} compact /></div>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {editing && (
+        <LegacyEditor event={editing.id ? editing : null} names={names}
+          onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
+      )}
+      {deckFor && (
+        <DeckEditor title={`${deckFor.place.name}'s deck · ${deckFor.event.name}`}
+          format={deckFor.event.format === "tag" ? "tag" : "groups"} deck={deckFor.place.deck || []}
+          userId={meId} onSave={saveDeck} onClose={() => setDeckFor(null)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Adding or changing a legacy tournament: its name, date, organiser and
+ * podium. Each place can be linked to a blader's profile, which lets that
+ * blader enter their own deck; a name alone is fine too.
+ */
+function LegacyEditor({ event, names, onClose, onSaved }) {
+  const [name, setName] = useState(event ? event.name : "");
+  const [date, setDate] = useState(event && event.played_on ? event.played_on : "");
+  const [organiser, setOrganiser] = useState(event ? event.organiser || "" : "");
+  const [format, setFormat] = useState(event ? event.format : "single");
+  const [places, setPlaces] = useState(() => (event && event.places.length
+    ? event.places.map((p) => ({ ...p, key: p.id }))
+    : [1, 2, 3].map((place) => ({ key: `new${place}`, place, name: "", blader_id: null, teammate_id: null }))));
+  const [linked, setLinked] = useState(names || {});   // blader id -> name, for the chips
+  const [picking, setPicking] = useState(null);        // { key, field }
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [askDelete, setAskDelete] = useState(false);
+  const tag = format === "tag";
+
+  const change = (key, patch) => setPlaces((ps) => ps.map((p) => (p.key === key ? { ...p, ...patch } : p)));
+
+  const save = async () => {
+    const list = places.map((p) => ({ ...p, name: p.name.trim() }));
+    if (!name.trim()) { setErr("Give the tournament a name."); return; }
+    if (!list.length) { setErr("Add at least one podium place."); return; }
+    if (list.some((p) => !p.name)) { setErr(`Every podium place needs a ${tag ? "team" : "blader"} name.`); return; }
+    setBusy(true); setErr(null);
+    const { error } = await saveLegacy(event ? event.id : null,
+      { name: name.trim(), organiser: organiser.trim() || null, played_on: date || null, format },
+      list, event ? event.places : []);
+    setBusy(false);
+    if (error) { setErr(error.message || "That could not be saved."); return; }
+    onSaved();
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    const { error } = await deleteLegacy(event.id);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    onSaved();
+  };
+
+  const LinkChip = ({ id, onClear }) => (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, padding: "3px 4px 3px 8px",
+      border: `1px solid ${C.cyan}66`, borderRadius: 3, color: C.cyan,
+    }}>
+      <Link2 size={12} />{linked[id] || "Linked blader"}
+      <button onClick={onClear} aria-label="Unlink" style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", padding: 1 }}>
+        <X size={13} />
+      </button>
+    </span>
+  );
+
+  return createPortal(
+    <SheetFrame title={event ? "Edit legacy tournament" : "Add a legacy tournament"} onClose={onClose}>
+      <Field label="Tournament name">
+        <input style={inputStyle} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} placeholder="Bey-Friday #3" />
+      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10 }}>
+        <Field label="Played on">
+          <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Organiser">
+          <input style={inputStyle} value={organiser} maxLength={80} onChange={(e) => setOrganiser(e.target.value)} placeholder="Optional" />
+        </Field>
+      </div>
+      <Field label="Format">
+        <Segmented value={format} onChange={setFormat} tone={C.cyan} options={[
+          { value: "single", label: "Singles" }, { value: "tag", label: "Tag team" },
+        ]} />
+      </Field>
+
+      <div className="bx-d" style={{ fontSize: 17, fontWeight: 700, margin: "18px 0 8px" }}>Podium</div>
+      {places.map((p) => (
+        <div key={p.key} style={{ ...card, marginBottom: 8, padding: "10px 12px" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <select value={p.place} onChange={(e) => change(p.key, { place: Number(e.target.value) })}
+              style={{ ...inputStyle, width: 82, padding: "8px 8px", color: PODIUM_COLOR[p.place] }}>
+              {[1, 2, 3].map((n) => <option key={n} value={n}>{PODIUM_LABEL[n]}</option>)}
+            </select>
+            <input style={{ ...inputStyle, padding: "8px 10px" }} value={p.name} maxLength={60}
+              placeholder={tag ? "Team name" : "Blader's name"} onChange={(e) => change(p.key, { name: e.target.value })} />
+            <button onClick={() => setPlaces((ps) => ps.filter((x) => x.key !== p.key))} aria-label="Remove this place"
+              style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", padding: 4 }}>
+              <X size={16} />
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {[["blader_id", tag ? "Link a member" : "Link to a blader"], ...(tag ? [["teammate_id", "Link the other member"]] : [])].map(([field, label]) =>
+              p[field]
+                ? <LinkChip key={field} id={p[field]} onClear={() => change(p.key, { [field]: null })} />
+                : (
+                  <button key={field} onClick={() => setPicking({ key: p.key, field })} style={{
+                    background: "none", border: `1px dashed ${C.line}`, borderRadius: 3, color: C.muted,
+                    cursor: "pointer", fontSize: 12.5, padding: "4px 8px", display: "inline-flex", alignItems: "center", gap: 5,
+                  }}><Link2 size={12} />{label}</button>
+                ))}
+          </div>
+        </div>
+      ))}
+      <button onClick={() => setPlaces((ps) => [...ps, { key: `new${Date.now()}`, place: 3, name: "", blader_id: null, teammate_id: null }])}
+        style={{ background: "none", border: "none", color: C.cyan, cursor: "pointer", fontSize: 13, padding: "4px 0 14px" }}>
+        + Add another place (a shared 3rd, say)
+      </button>
+      <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5, marginBottom: 14, maxWidth: "60ch" }}>
+        A linked blader can add and change their own deck for this tournament. Decks are entered from the list
+        after saving.
+      </div>
+
+      {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn tone="primary" disabled={busy} onClick={save}><Check size={15} />Save</Btn>
+        <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
+        {event && (askDelete ? (
+          <Btn tone="danger" disabled={busy} onClick={remove} style={{ marginLeft: "auto" }}>
+            <Trash2 size={14} />Remove it and its decks
+          </Btn>
+        ) : (
+          <Btn tone="ghost" onClick={() => setAskDelete(true)} style={{ marginLeft: "auto" }}>
+            <Trash2 size={14} />Remove
+          </Btn>
+        ))}
+      </div>
+
+      {picking && (
+        <BladerPicker title={picking.field === "teammate_id" ? "The other member" : tag ? "A team member" : "Who finished here"}
+          taken={new Set()} onClose={() => setPicking(null)}
+          onPick={(b) => {
+            setLinked((m) => ({ ...m, [b.id]: b.blader_name }));
+            const p = places.find((x) => x.key === picking.key);
+            change(picking.key, { [picking.field]: b.id, ...(!tag && p && !p.name.trim() ? { name: b.blader_name } : {}) });
+            setPicking(null);
+          }} />
+      )}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
 function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onMeta, onProfile, awarder, waiting = 0, partsManager, onParts }) {
+  // Tournaments run in the app, or legacy ones played before it.
+  const [tab, setTab] = useState("live");
   const hosted = mine.filter((e) => e.role === "owner");
   const reffed = mine.filter((e) => e.role === "referee");
 
@@ -9002,6 +9286,14 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
 
         {profile && <SeriesRequests />}
 
+        <div style={{ marginBottom: 20 }}>
+          <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
+            { value: "live", label: "Tournaments" },
+            { value: "legacy", label: "Legacy tournaments" },
+          ]} />
+        </div>
+
+        {tab === "legacy" ? <LegacyList awarder={awarder} meId={profile ? profile.id : null} /> : (<>
         {/* Yours to run. */}
         {hosted.length > 0 && (
           <div style={{ marginBottom: 26 }}>
@@ -9046,6 +9338,7 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
             </div>
           </div>
         )}
+        </>)}
       </div>
     </div>
   );
