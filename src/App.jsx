@@ -4,6 +4,7 @@ import {
   Shuffle, Plus, X, Trophy, Users, Swords, Table2, Settings,
   Undo2, ArrowLeft, Trash2, AlertTriangle, GitBranch, ChevronRight, Check, Medal, Lock, Unlock, Eye,
   Image as ImageIcon, Download, Crown, Pencil, User, Search, Camera, Link2, List, Network, Clock, Send,
+  BarChart3,
 } from "lucide-react";
 import { supabase, arrival } from "./lib/supabase.js";
 import {
@@ -27,10 +28,11 @@ import {
   withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
   loadParts, amPartsManager, savePart, deletePart, partImageUrl, uploadPartImage, removePartImage,
   allTournamentDecks, loadDecks, decksForEvents, saveDeck,
-  matchParts, refCounts, replaceCatalogueRefs, submitDeckPhoto, deckPhotosWaiting, deckPhotoCount,
+  metaEvents, matchParts, refCounts, replaceCatalogueRefs, submitDeckPhoto, deckPhotosWaiting, deckPhotoCount,
   reviewDeckPhoto, deckPhotoLinks,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
+import { metaTable, sortRows, MIN_DECKS } from "./meta.js";
 import {
   DETECT_KINDS, DETECT_MODEL, isSure, STAGINGS, loadDetector, loadPhoto, readingOrder,
   cropBox, embed, vectorText, stagedPicture, tapBox, CROP_MARGIN,
@@ -8635,7 +8637,216 @@ function PartEditor({ part, onClose, onSaved }) {
  * Signing in is a button in the corner rather than a wall, because almost
  * everyone who opens this is here to watch, not to score.
  */
-function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onProfile, awarder, waiting = 0, partsManager, onParts }) {
+/* ---- meta ---- */
+
+/**
+ * One tournament's entries for the meta table: each player with a deck, the
+ * podium place they finished in (once it is decided), whether they made the
+ * knockout, and their match wins and losses across the whole tournament.
+ *
+ * The podium: with a knockout, the final's winner and loser, and the
+ * third-place match's winner - or, with no third-place match, both beaten
+ * semi-finalists. Without a knockout, the top three of the table once every
+ * match is played.
+ */
+function metaEntries(t, decks, eventId) {
+  if (!t || !Array.isArray(t.players)) return [];
+  const rec = {};
+  const tally = (id) => (rec[id] = rec[id] || { wins: 0, losses: 0 });
+  allMatchesOf(t).forEach((m) => {
+    if (!m.done || !m.p1 || !m.p2) return;
+    const w = winnerOf(m);
+    if (!w) return;
+    tally(w).wins++;
+    tally(w === m.p1 ? m.p2 : m.p1).losses++;
+  });
+
+  const place = {};
+  const loserOf = (m) => { const w = winnerOf(m); return w && m.p1 && m.p2 ? (w === m.p1 ? m.p2 : m.p1) : null; };
+  if (t.bracket && t.bracket.rounds && t.bracket.rounds.length) {
+    const rounds = t.bracket.rounds;
+    const final = rounds[rounds.length - 1][0];
+    const champ = winnerOf(final);
+    if (champ) {
+      place[champ] = 1;
+      const second = loserOf(final);
+      if (second) place[second] = 2;
+      if (t.bracket.third) {
+        const third = winnerOf(t.bracket.third);
+        if (third) place[third] = 3;
+      } else if (rounds.length >= 2) {
+        rounds[rounds.length - 2].forEach((m) => { const l = loserOf(m); if (l && !place[l]) place[l] = 3; });
+      }
+    }
+  } else if (!t.koSize && (t.groupMatches || []).length && t.groupMatches.every((m) => m.done)) {
+    const nameOf = (id) => (t.players.find((p) => p.id === id) || {}).name || "";
+    const rows = computeStandings(t.players.map((p) => p.id), t.groupMatches, nameOf,
+      isLeague(t) ? t.leaguePoints : null, t.tieBreaks);
+    rows.slice(0, 3).forEach((r, i) => { if (r.played) place[r.id] = i + 1; });
+  }
+
+  const cut = new Set();
+  if (t.bracket && t.bracket.rounds && t.bracket.rounds[0]) {
+    t.bracket.rounds[0].forEach((m) => { if (m.p1) cut.add(m.p1); if (m.p2) cut.add(m.p2); });
+  }
+
+  return t.players.map((p) => ({
+    eventId,
+    deck: (decks && decks[p.id]) || p.deck || [],
+    place: place[p.id] || null,
+    topCut: cut.has(p.id),
+    wins: (rec[p.id] || {}).wins || 0,
+    losses: (rec[p.id] || {}).losses || 0,
+  }));
+}
+
+const PODIUM_COLORS = { first: "#F2C14E", second: "#C3CBD6", third: "#C98A55" };
+const pctOf = (x) => `${Math.round(x * 100)}%`;
+
+/** A row's numbers: podium places as coloured counts, then decks, top cut and record. */
+function MetaStats({ row }) {
+  return (
+    <>
+      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+        {[["first", "1st"], ["second", "2nd"], ["third", "3rd"]].map(([k, label]) => (
+          <span key={k} title={`${label} place`} className="bx-d" style={{
+            minWidth: 26, textAlign: "center", fontSize: 13, fontWeight: 800, padding: "2px 5px", borderRadius: 3,
+            background: row[k] ? `${PODIUM_COLORS[k]}26` : "transparent", color: row[k] ? PODIUM_COLORS[k] : C.line,
+            border: `1px solid ${row[k] ? `${PODIUM_COLORS[k]}66` : C.line}`,
+          }}>{row[k]}</span>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function MetaLine({ row }) {
+  return (
+    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+      {row.decks} deck{row.decks === 1 ? "" : "s"} · {pctOf(row.usage)} of decks · top cut {row.topCut} ·{" "}
+      {row.wins}–{row.losses}{row.winRate !== null ? ` (${pctOf(row.winRate)})` : ""}
+    </div>
+  );
+}
+
+/** A combo's part pictures, small and side by side. */
+function ComboPictures({ combo, size = 26 }) {
+  const type = COMBO_TYPES[combo.type] ? combo.type : "bx";
+  return (
+    <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+      {COMBO_TYPES[type].slots.filter((s) => combo[s]).map((s) => {
+        const pic = partImageUrl(partPicture(s, combo[s]));
+        return pic
+          ? <img key={s} src={pic} alt="" title={combo[s]} style={{ width: size, height: size, objectFit: "contain" }} />
+          : null;
+      })}
+    </div>
+  );
+}
+
+/**
+ * The meta: blades and combos across every tournament, by deck credit.
+ * Ordered by podium points (3, 2, 1), then top cuts, then decks; any of
+ * the numbers can be chosen to order by instead. Tap a blade for its combos.
+ */
+function MetaSheet({ onClose }) {
+  const [table, setTable] = useState(undefined);
+  const [view, setView] = useState("blades");
+  const [sort, setSort] = useState("points");
+  const [open, setOpen] = useState(null);
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    metaEvents().then((evs) => {
+      if (!evs) { setTable(null); return; }
+      setTable(metaTable(evs.flatMap((e) => metaEntries(e.data, e.decks, e.id))));
+    });
+  }, []);
+
+  const key = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const rows = table ? sortRows(view === "blades" ? table.blades : table.combos, sort) : [];
+  const shown = rows.map((r, i) => ({ r, rank: i + 1 })).filter(({ r }) => !q.trim() || key(r.name).includes(key(q)));
+
+  return (
+    <SheetFrame title="Meta" onClose={onClose}>
+      {table === undefined ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Counting every deck…</div>
+      ) : table === null ? (
+        <div style={{ color: C.magenta, fontSize: 14 }}>The tournaments could not be loaded. Try again in a moment.</div>
+      ) : (
+        <>
+          <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 14, maxWidth: "62ch" }}>
+            From {table.decks} deck{table.decks === 1 ? "" : "s"} in {table.events} tournament{table.events === 1 ? "" : "s"}.
+            A podium, a top cut or a match counts for every blade and combo in the deck that earned it.
+            Win rates show once {MIN_DECKS} decks stand behind them.
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <Segmented value={view} onChange={(v) => { setView(v); setOpen(null); }} tone={C.cyan} options={[
+              { value: "blades", label: `Blades (${table.blades.length})` },
+              { value: "combos", label: `Combos (${table.combos.length})` },
+            ]} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, color: C.muted }}>Order by</span>
+            {[["points", "Podiums"], ["decks", "Decks"], ["topCut", "Top cut"], ["winRate", "Win %"]].map(([v, label]) => (
+              <button key={v} onClick={() => setSort(v)} className="bx-d" style={{
+                padding: "5px 9px", borderRadius: 3, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                background: sort === v ? C.cyan : C.base, color: sort === v ? "#14020A" : C.muted,
+                border: `1px solid ${sort === v ? C.cyan : C.line}`,
+              }}>{label}</button>
+            ))}
+          </div>
+          <input style={{ ...inputStyle, padding: "8px 10px", marginBottom: 12 }} value={q}
+            placeholder={view === "blades" ? "Find a blade" : "Find a combo"} onChange={(e) => setQ(e.target.value)} />
+
+          {!rows.length && (
+            <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>
+              No decks yet. Decks entered in tournaments that have started show up here.
+            </div>
+          )}
+
+          {shown.map(({ r, rank }) => {
+            const isOpen = view === "blades" && open === r.key;
+            const own = isOpen ? sortRows(table.combos.filter((c) => c.blade === r.key), sort) : [];
+            return (
+              <div key={r.key} style={{ ...card, padding: "9px 11px", marginBottom: 6, borderColor: isOpen ? C.cyan : C.line }}>
+                <div onClick={view === "blades" ? () => setOpen(isOpen ? null : r.key) : undefined}
+                  style={{ display: "flex", alignItems: "center", gap: 10, cursor: view === "blades" ? "pointer" : "default" }}>
+                  <span className="bx-d" style={{ width: 24, fontSize: 15, fontWeight: 800, color: rank <= 3 ? C.gold : C.muted }}>{rank}</span>
+                  {view === "blades"
+                    ? <PartThumb path={partPicture(r.slot, r.part)} size={40} />
+                    : <ComboPictures combo={r.combo} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="bx-d" style={{ fontSize: 15.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
+                    <MetaLine row={r} />
+                  </div>
+                  <MetaStats row={r} />
+                </div>
+                {isOpen && (
+                  <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.line}` }}>
+                    <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>Its combos</div>
+                    {own.map((c) => (
+                      <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderBottom: `1px solid ${C.line}55` }}>
+                        <ComboPictures combo={c.combo} size={22} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5 }}>{c.name}</div>
+                          <MetaLine row={c} />
+                        </div>
+                        <MetaStats row={c} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+    </SheetFrame>
+  );
+}
+
+function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut, onApprovals, onBladers, onMeta, onProfile, awarder, waiting = 0, partsManager, onParts }) {
   const hosted = mine.filter((e) => e.role === "owner");
   const reffed = mine.filter((e) => e.role === "referee");
 
@@ -8715,6 +8926,9 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
           </div>
 
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <Btn onClick={onMeta} tone="ghost" style={{ padding: "7px 11px" }} aria-label="Meta">
+              <BarChart3 size={14} /><span className="bx-role-label">Meta</span>
+            </Btn>
             <Btn onClick={onBladers} tone="ghost" style={{ padding: "7px 11px" }} aria-label="Bladers">
               <Users size={14} /><span className="bx-role-label">Bladers</span>
             </Btn>
@@ -9006,6 +9220,7 @@ export default function App() {
         profile={profile}
         me={me}
         onBladers={() => setSheet("bladers")}
+        onMeta={() => setSheet("meta")}
         onProfile={() => session && setViewBlader(session.user.id)}
         mine={events}
         all={directory}
@@ -9017,6 +9232,7 @@ export default function App() {
         onSignIn={() => setSigningIn(true)}
         onSignOut={async () => { await signOut(); setOpenId(null); }}
       />
+      {sheet === "meta" && <MetaSheet onClose={() => setSheet(null)} />}
       {sheet === "parts" && partsManager && (
         <PartsSheet onClose={() => setSheet(null)} onChanged={useParts} />
       )}

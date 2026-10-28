@@ -50,7 +50,14 @@ different angles. The Parts screen can grow a photo set per part later.
 - A blader's own editing locks once the tournament starts. Organisers can
   still change it.
 
-## Phase 4 — the Meta page
+## Phase 4 — the Meta page (built)
+
+Built as below, opened from a Meta button beside Bladers. Not yet: the
+All / Official only filter, which waits on Phase 2. Match record counts every
+match, knockout included. A podium without a third-place match gives 3rd to
+both beaten semi-finalists; without a knockout, the top three of the table
+once every match is played. Counting is in src/meta.js.
+
 
 Public, with two tables and a filter: **All tournaments / Official only**.
 

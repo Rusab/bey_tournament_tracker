@@ -806,3 +806,18 @@ export async function deckPhotoLinks(paths) {
   if (error || !data) return {};
   return Object.fromEntries(data.filter((d) => d.signedUrl).map((d) => [d.path, d.signedUrl]));
 }
+
+/* --------------------------------------------------------------------- meta */
+
+/**
+ * Every tournament with its data and its decks, for the meta table. Decks
+ * come back only where this viewer may see them - for a visitor, the
+ * tournaments that have started. Null if the tournaments could not be loaded.
+ */
+export async function metaEvents() {
+  const { data, error } = await supabase.from("events")
+    .select("id, name, created_at, format, data").order("created_at", { ascending: false });
+  if (error) { console.error(error); return null; }
+  const decks = (await decksForEvents((data || []).map((e) => e.id))) || {};
+  return (data || []).map((e) => ({ ...e, decks: decks[e.id] || {} }));
+}
