@@ -13,7 +13,8 @@
 --  And who may change it:
 --
 --    the host and referees                 at any time
---    the linked blader                     until the tournament starts
+--    the linked blader                     while the tournament's deck lock is off
+--                                          (it switches on when the first match is scored)
 --
 --  A tournament has started once any match in it holds a score.
 --
@@ -60,6 +61,18 @@ grant execute on function public.runs_event(uuid) to anon, authenticated;
 grant execute on function public.event_started(uuid) to anon, authenticated;
 grant execute on function public.deck_is_mine(uuid, text) to anon, authenticated;
 
+-- Whether bladers' own deck editing is locked. The tournament's
+-- "Lock bladers' own decks" setting (decksLocked in its data) decides;
+-- a tournament saved before that setting existed is locked once started.
+create or replace function public.decks_locked(e uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce((select case when jsonb_typeof(data->'decksLocked') = 'boolean'
+                               then (data->>'decksLocked')::boolean end
+                   from events where id = e), public.event_started(e));
+$$;
+revoke execute on function public.decks_locked(uuid) from public;
+grant execute on function public.decks_locked(uuid) to anon, authenticated;
+
 -- The read rule below asks this for every viewer, signed in or not. A
 -- visitor who may not run it at all would have every read refused, so it
 -- is open to visitors too; it simply answers false for them.
@@ -89,19 +102,19 @@ create policy "decks seen when allowed" on event_decks for select
 drop policy if exists "decks added when allowed" on event_decks;
 create policy "decks added when allowed" on event_decks for insert to authenticated
   with check (public.runs_event(event_id)
-              or (public.deck_is_mine(event_id, player_id) and not public.event_started(event_id)));
+              or (public.deck_is_mine(event_id, player_id) and not public.decks_locked(event_id)));
 
 drop policy if exists "decks changed when allowed" on event_decks;
 create policy "decks changed when allowed" on event_decks for update to authenticated
   using (public.runs_event(event_id)
-         or (public.deck_is_mine(event_id, player_id) and not public.event_started(event_id)))
+         or (public.deck_is_mine(event_id, player_id) and not public.decks_locked(event_id)))
   with check (public.runs_event(event_id)
-              or (public.deck_is_mine(event_id, player_id) and not public.event_started(event_id)));
+              or (public.deck_is_mine(event_id, player_id) and not public.decks_locked(event_id)));
 
 drop policy if exists "decks removed when allowed" on event_decks;
 create policy "decks removed when allowed" on event_decks for delete to authenticated
   using (public.runs_event(event_id)
-         or (public.deck_is_mine(event_id, player_id) and not public.event_started(event_id)));
+         or (public.deck_is_mine(event_id, player_id) and not public.decks_locked(event_id)));
 
 revoke all on event_decks from anon, authenticated;
 grant select on event_decks to anon, authenticated;

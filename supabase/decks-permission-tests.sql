@@ -129,6 +129,16 @@ begin
     step := step + 1; n := pg_temp.attempt(h, put_p1);
     results := results || row(step, 'after the start: the host changes it', 'allowed',
       case when n > 0 then 'allowed' else 'REFUSED' end, n > 0)::deck_results;
+    -- An organiser unticks "Lock bladers' own decks" mid-tournament.
+    update events set data = data || '{"decksLocked": false}'::jsonb where id = e;
+    step := step + 1; n := pg_temp.attempt(x, put_p1);
+    results := results || row(step, 'lock unticked after the start: the linked blader changes their own', 'allowed',
+      case when n > 0 then 'allowed' else 'REFUSED' end, n > 0)::deck_results;
+    update events set data = data || '{"decksLocked": true}'::jsonb where id = e;
+    step := step + 1; n := pg_temp.attempt(x, put_p1);
+    results := results || row(step, 'lock ticked again: the linked blader changes their own', 'refused',
+      case when n > 0 then 'ALLOWED' else 'refused' end, n <= 0)::deck_results;
+
     step := step + 1; n := pg_temp.attempt(h, format(
       'update event_decks set deck = %L where event_id = %L and player_id = %L', '[]', e, 'p1'));
     results := results || row(step, 'a deck with nothing in it', 'refused',

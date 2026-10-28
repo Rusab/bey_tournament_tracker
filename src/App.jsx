@@ -1566,6 +1566,15 @@ function matchLabel(t, m, nameOf) {
  */
 const tournamentStarted = (t) => allMatchesOf(t).some((m) => (m.events || []).length > 0);
 
+/*
+ * Whether bladers may no longer change their own decks: the tournament's
+ * "Lock bladers' own decks" setting. It ticks itself when the first match
+ * is scored and unticks itself when every score is cleared; an organiser
+ * can untick it by hand in between. A tournament saved before the setting
+ * existed is locked once started. The database applies the same rule.
+ */
+const decksLocked = (t) => (typeof (t && t.decksLocked) === "boolean" ? t.decksLocked : tournamentStarted(t));
+
 /** Matches that already hold a score — what a redraw or reset would destroy. */
 function scoredCount(t) {
   const all = [
@@ -1831,7 +1840,13 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
 
   const update = (fn, opts = {}) => {
     if (!check(fn, opts.what, opts.allow, opts.fromScore)) return false;
-    setT((prev) => fn(structuredClone(prev)));
+    setT((prev) => {
+      const next = fn(structuredClone(prev));
+      // The deck lock follows the start: on with the first score, off once every score is gone.
+      const was = tournamentStarted(prev), now = tournamentStarted(next);
+      if (next && was !== now) next.decksLocked = now;
+      return next;
+    });
     return true;
   };
 
@@ -4318,7 +4333,7 @@ function DeckSection({ t, playerId, canEdit, onSave, lockedNote }) {
       {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 8 }}>{err}</div>}
       {lockedNote && (
         <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 8 }}>
-          The tournament has started, so your deck is locked. An organiser can still change it.
+          Decks are locked for this tournament. An organiser can still change yours.
         </div>
       )}
       {deck.length ? <DeckView deck={deck} /> : (
@@ -4579,8 +4594,8 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
 
         {(isAdmin || tournamentStarted(t) || ownDeck) && (
           <DeckSection t={t} playerId={playerId} onSave={onSaveDeck}
-            canEdit={!!onSaveDeck && (isAdmin || (ownDeck && !tournamentStarted(t)))}
-            lockedNote={ownDeck && !isAdmin && tournamentStarted(t)} />
+            canEdit={!!onSaveDeck && (isAdmin || (ownDeck && !decksLocked(t)))}
+            lockedNote={ownDeck && !isAdmin && decksLocked(t)} />
         )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
@@ -5087,6 +5102,21 @@ function SettingsSheet({ t, update, onClose, onReset, onReferees, canDelete, isO
               onChange={(e) => update((d) => { d.protectResults = e.target.checked; return d; })}
               style={{ width: 17, height: 17, accentColor: C.magenta }} />
             <span style={{ fontSize: 14.5 }}>Protect played matches</span>
+          </label>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+          <div className="bx-d" style={{ fontSize: 19, fontWeight: 700, marginBottom: 5 }}>Bladers' own decks</div>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 13, lineHeight: 1.5, maxWidth: "56ch" }}>
+            A blader linked to a player can enter their own deck until this is ticked. It ticks itself
+            when the first match is scored and unticks itself if every score is cleared. Untick it to
+            let bladers fix their decks; organisers can change any deck either way.
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
+            <input type="checkbox" checked={decksLocked(t)}
+              onChange={(e) => update((d) => { d.decksLocked = e.target.checked; return d; })}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            <span style={{ fontSize: 14.5 }}>Lock bladers' own decks</span>
           </label>
         </div>
 
