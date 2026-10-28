@@ -80,9 +80,9 @@ Built as below, with these specifics:
 
 - Finding beys: the blader taps each bey on the photo (or drags from its
   middle to its edge). Automatic finding was tried (background separation,
-  then circle detection) and dropped in favour of taps. For a tap, a few crop
-  the circle takes the size of the beys already marked; the model runs once
-  per bey, in a background worker. Only the bey's circle is
+  then circle detection) and dropped in favour of taps. A tapped
+  circle takes the size of the beys already marked; the model runs once per
+  bey, in a background worker. Only the bey's circle is
   matched; the rest of the crop is blanked out.
 - A small detector (YOLO-style) can replace the taps later, trained on
   approved deck photos, which are stored with their boxes.
