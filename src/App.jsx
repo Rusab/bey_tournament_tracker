@@ -9286,14 +9286,17 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
 
         {profile && <SeriesRequests />}
 
-        <div style={{ marginBottom: 20 }}>
-          <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
-            { value: "live", label: "Tournaments" },
-            { value: "legacy", label: "Legacy tournaments" },
-          ]} />
-        </div>
+        {/* Legacy tournaments are only shown to the medal manager for now. */}
+        {awarder && (
+          <div style={{ marginBottom: 20 }}>
+            <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
+              { value: "live", label: "Tournaments" },
+              { value: "legacy", label: "Legacy tournaments" },
+            ]} />
+          </div>
+        )}
 
-        {tab === "legacy" ? <LegacyList awarder={awarder} meId={profile ? profile.id : null} /> : (<>
+        {awarder && tab === "legacy" ? <LegacyList awarder={awarder} meId={profile ? profile.id : null} /> : (<>
         {/* Yours to run. */}
         {hosted.length > 0 && (
           <div style={{ marginBottom: 26 }}>
