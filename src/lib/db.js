@@ -723,3 +723,86 @@ export async function pendingHosts() {
 
 export const approveHost = (id, value) =>
   supabase.rpc("set_approved", { target: id, value });
+
+/* ---------------------------------------------------------------- detection */
+
+/*
+ * Deck photo detection. References are lists of numbers describing what
+ * each blade looks like; the database names the closest blades to a bey.
+ * Photos bladers send in sit in a private bucket until the parts manager
+ * approves them (they become references) or turns them down (deleted).
+ */
+
+const DECK_PHOTOS = "deck-photos";
+export const DECK_PHOTO_LIMIT = 10;
+
+/** The closest blades to one bey, best first. Null if detection is not set up. */
+export async function matchParts(vector, model, count = 3) {
+  const { data, error } = await supabase.rpc("match_parts", { p_query: vector, p_model: model, p_count: count });
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+/** { partId: { catalogue, photos } }. Null if the detection script has not run. */
+export async function refCounts(model) {
+  const { data, error } = await supabase.rpc("part_ref_counts", { p_model: model });
+  if (error) return null;
+  return Object.fromEntries((data || []).map((r) => [r.part_id, { catalogue: r.catalogue, photos: r.photos }]));
+}
+
+/** Swaps a part's catalogue references for new ones. Photo references stay. */
+export async function replaceCatalogueRefs(partId, model, vectors) {
+  const del = await supabase.from("part_refs").delete()
+    .eq("part_id", partId).eq("source", "catalogue").eq("model", model);
+  if (del.error) return { error: del.error };
+  if (!vectors.length) return {};
+  const { error } = await supabase.from("part_refs").insert(
+    vectors.map((embedding) => ({ part_id: partId, source: "catalogue", model, embedding })));
+  return error ? { error } : {};
+}
+
+/** Sends a confirmed deck photo in for checking. boxes carry their part_id and numbers (e). */
+export async function submitDeckPhoto(userId, blob, boxes, model) {
+  const ext = { "image/webp": "webp", "image/jpeg": "jpg" }[blob.type] || "jpg";
+  const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const up = await supabase.storage.from(DECK_PHOTOS).upload(path, blob, { contentType: blob.type });
+  if (up.error) return { error: new Error("The photo could not be uploaded.") };
+  const { error } = await supabase.rpc("submit_deck_photo", { p_path: path, p_boxes: boxes, p_model: model });
+  if (error) {
+    await supabase.storage.from(DECK_PHOTOS).remove([path]);
+    return { error };
+  }
+  return {};
+}
+
+const PHOTO_COLS = "id, user_id, photo_path, boxes, model, created_at";
+
+/** Photos waiting, oldest first. Only the parts manager gets anything back. */
+export async function deckPhotosWaiting() {
+  const { data, error } = await supabase.from("deck_photos").select(PHOTO_COLS)
+    .eq("status", "waiting").order("created_at", { ascending: true }).limit(30);
+  if (error) { console.error(error); return null; }
+  return data || [];
+}
+
+export async function deckPhotoCount() {
+  const { count, error } = await supabase.from("deck_photos")
+    .select("id", { count: "exact", head: true }).eq("status", "waiting");
+  return error ? 0 : count || 0;
+}
+
+/** labels: one part id (or null to leave out) per box, or null to keep the blader's. */
+export async function reviewDeckPhoto(id, approve, labels = null) {
+  const { data, error } = await supabase.rpc("review_deck_photo", { p_id: id, p_approve: approve, p_labels: labels });
+  if (error) return { error };
+  if (data) await supabase.storage.from(DECK_PHOTOS).remove([data]);
+  return {};
+}
+
+/** Links to the private photos, good for ten minutes. */
+export async function deckPhotoLinks(paths) {
+  if (!paths.length) return {};
+  const { data, error } = await supabase.storage.from(DECK_PHOTOS).createSignedUrls(paths, 600);
+  if (error || !data) return {};
+  return Object.fromEntries(data.filter((d) => d.signedUrl).map((d) => [d.path, d.signedUrl]));
+}

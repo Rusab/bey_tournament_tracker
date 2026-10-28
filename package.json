@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/bracket.test.mjs && node tests/participation.test.mjs && node tests/matching.test.mjs && node tests/deck.test.mjs && node tests/standings.test.mjs && node tests/series.test.mjs && node tests/image.test.mjs && node tests/paired.test.mjs && node tests/protect.test.mjs && node tests/catalogue.test.mjs"
+    "test": "node tests/bracket.test.mjs && node tests/participation.test.mjs && node tests/matching.test.mjs && node tests/deck.test.mjs && node tests/standings.test.mjs && node tests/series.test.mjs && node tests/image.test.mjs && node tests/paired.test.mjs && node tests/protect.test.mjs && node tests/catalogue.test.mjs && node tests/detect.test.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.8.1",
     "@supabase/supabase-js": "^2.45.4",
     "lucide-react": "^0.441.0",
     "react": "^18.3.1",

@@ -27,8 +27,14 @@ import {
   withdrawMedalClaim, reviewMedalClaim, proofLinks, sweepProofs,
   loadParts, amPartsManager, savePart, deletePart, partImageUrl, uploadPartImage, removePartImage,
   allTournamentDecks, loadDecks, decksForEvents, saveDeck,
+  matchParts, refCounts, replaceCatalogueRefs, submitDeckPhoto, deckPhotosWaiting, deckPhotoCount,
+  reviewDeckPhoto, deckPhotoLinks,
 } from "./lib/db.js";
 import { seriesRanking } from "./series.js";
+import {
+  DETECT_KINDS, DETECT_MODEL, isSure, STAGINGS, loadDetector, loadPhoto, findBeys, readingOrder,
+  cropBox, embed, vectorText, stagedPicture,
+} from "./detect.js";
 import { renderRankingImage } from "./rankingImage.js";
 
 /* ================================================================== */
@@ -4305,7 +4311,7 @@ function MatchReview({ checks, onDone, onClose }) {
  * The beyblades a player brought, as the hobby writes them. Anyone can see a
  * deck once it is entered; only whoever runs the tournament can enter it.
  */
-function DeckSection({ t, playerId, canEdit, onSave, lockedNote }) {
+function DeckSection({ t, playerId, canEdit, onSave, lockedNote, meId }) {
   const [editing, setEditing] = useState(false);
   const [err, setErr] = useState(null);
   const p = t.players.find((x) => x.id === playerId);
@@ -4340,7 +4346,7 @@ function DeckSection({ t, playerId, canEdit, onSave, lockedNote }) {
         <div style={{ color: C.muted, fontSize: 13.5 }}>No deck entered. It is optional.</div>
       )}
       {editing && (
-        <DeckEditor title={`${p.name}'s deck`} format={t.format} deck={deck}
+        <DeckEditor title={`${p.name}'s deck`} format={t.format} deck={deck} userId={meId}
           onSave={save} onClose={() => setEditing(false)} />
       )}
     </div>
@@ -4445,8 +4451,9 @@ function PartInput({ type, slot, value, onChange, invalid }) {
  * too, so "LF" is Low Flat and "360" is 3-60. Nothing is saved while any part
  * appears twice: that is the one rule a deck has.
  */
-function DeckEditor({ title, format, deck, onSave, onClose }) {
+function DeckEditor({ title, format, deck, onSave, onClose, userId }) {
   const size = deckSize(format);
+  const [scanning, setScanning] = useState(false);
   const [combos, setCombos] = useState(() => {
     const d = (deck || []).map((c) => ({ ...c }));
     while (d.length < size) d.push(emptyCombo());
@@ -4463,6 +4470,18 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
         Up to {size} beyblades. No part can appear twice in one deck. Choose from the list, or type
         any part — letters work too, like LF or 3-60.
       </div>
+      <div style={{ marginBottom: 16 }}>
+        <Btn onClick={() => setScanning(true)}><Camera size={15} />Scan a photo of the deck</Btn>
+      </div>
+      {scanning && (
+        <DeckScanner size={size} userId={userId} onClose={() => setScanning(false)}
+          onUse={(picks) => setCombos((cs) => cs.map((c, i) => {
+            const p = picks[i];
+            if (!p) return c;
+            const { type, slot } = DETECT_KINDS[p.kind];
+            return { ...c, type, [slot]: p.name };
+          }))} />
+      )}
 
 
       {combos.map((c, i) => (
@@ -4522,6 +4541,274 @@ function DeckEditor({ title, format, deck, onSave, onClose }) {
         </Btn>
         <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
       </div>
+    </SheetFrame>,
+    document.body,
+  );
+}
+
+/** The blades a photo can be matched to, from the catalogue in use. */
+const detectableParts = () => Object.keys(DETECT_KINDS).flatMap((kind) =>
+  partsOf(kind).map((p) => ({ part_id: p.id || null, kind, name: p.name, image_path: p.image || null })));
+
+const DETECT_KIND_LABEL = { blade: "BX / UX", infinity_blade: "UX Infinity", main_blade: "CX", metal_blade: "CX Infinity" };
+
+/** A part search for when none of the suggestions is right. */
+function BladeChooser({ onPick, onCancel }) {
+  const [q, setQ] = useState("");
+  const all = useMemo(detectableParts, []);
+  const key = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const shown = all.filter((p) => !q.trim() || key(p.name).includes(key(q))).slice(0, 40);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+        <input autoFocus style={{ ...inputStyle, padding: "8px 10px" }} value={q}
+          placeholder="Search blades" onChange={(e) => setQ(e.target.value)} />
+        <Btn tone="ghost" style={{ padding: "7px 10px" }} onClick={onCancel}>Cancel</Btn>
+      </div>
+      <div style={{ maxHeight: 280, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 3 }}>
+        {shown.map((p) => (
+          <button key={`${p.kind}:${p.name}`} type="button" onClick={() => onPick(p)} style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 9, textAlign: "left", background: "none",
+            border: "none", borderBottom: `1px solid ${C.line}55`, color: C.ink, padding: "5px 8px", cursor: "pointer",
+          }}>
+            <PartThumb path={p.image_path} size={38} />
+            <span style={{ flex: 1, fontSize: 14 }}>{p.name}</span>
+            <span style={{ fontSize: 11.5, color: C.muted }}>{DETECT_KIND_LABEL[p.kind]}</span>
+          </button>
+        ))}
+        {!shown.length && <div style={{ padding: 10, color: C.muted, fontSize: 13 }}>No blade by that name.</div>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Scanning a deck: one photo of the beys laid out top-down on a plain
+ * surface. Each bey found is offered the three closest blades; the blader
+ * confirms or picks another, and the picks fill the deck's blades in the
+ * order the beys lie (top row first, left to right). If they agree, the
+ * photo goes to the parts manager, and only once approved does it help
+ * later scans.
+ */
+function DeckScanner({ size, userId, onUse, onClose }) {
+  const [stage, setStage] = useState("camera");    // camera | working | review | failed
+  const [photo, setPhoto] = useState(null);         // the photo, as a canvas
+  const [photoUrl, setPhotoUrl] = useState(null);
+  const [beys, setBeys] = useState([]);              // { key, box, crop, vec, matches, pick }
+  const [status, setStatus] = useState("");
+  const [err, setErr] = useState(null);
+  const [share, setShare] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [choosing, setChoosing] = useState(null);   // the bey whose blade is being searched for
+  const [busy, setBusy] = useState(false);
+  const blob = useRef(null);
+  useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl); }, [photoUrl]);
+
+  // Crops, numbers and matches for some boxes of the photo.
+  const look = async (boxes, canvas) => {
+    const crops = boxes.map((b) => cropBox(canvas, b));
+    const vecs = await embed(crops);
+    const found = await Promise.all(vecs.map((v) => matchParts(vectorText(v), DETECT_MODEL, 3)));
+    if (found.some((m) => m === null)) throw new Error("setup");
+    if (found.some((m) => m.length === 0)) throw new Error("no-refs");
+    return boxes.map((box, i) => ({
+      key: Math.random().toString(36).slice(2), box, vec: vecs[i],
+      crop: crops[i].toDataURL("image/jpeg", 0.8), matches: found[i],
+      pick: isSure(found[i]) ? found[i][0] : null,
+    }));
+  };
+  const ordered = (list) => readingOrder(list.map((b) => ({ ...b.box, bey: b }))).map((x) => x.bey);
+  const explain = (e) => (e.message === "setup"
+    ? "Detection is not set up yet: detection-schema.sql has not been run."
+    : e.message === "no-refs"
+      ? "The detector has nothing to compare against yet. The parts manager builds its references from Parts → Detection."
+      : "Something went wrong reading that photo. Try again, or enter the deck by hand.");
+
+  const start = async (file) => {
+    setStage("working"); setErr(null);
+    try {
+      setStatus("Reading the photo…");
+      const canvas = await loadPhoto(file);
+      blob.current = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+      setPhoto(canvas);
+      setPhotoUrl(URL.createObjectURL(blob.current));
+      const boxes = findBeys(canvas).slice(0, size + 2);
+      setStatus("Getting the detector ready…");
+      await loadDetector((p) => setStatus(`Downloading the detector (about 24MB, only the first time): ${Math.round(p * 100)}%`));
+      setStatus(`Looking at ${boxes.length} bey${boxes.length === 1 ? "" : "s"}…`);
+      setBeys(boxes.length ? await look(boxes, canvas) : []);
+      setStage("review");
+    } catch (e) {
+      console.error(e);
+      setErr(explain(e));
+      setStage("failed");
+    }
+  };
+
+  // A tap on the photo, while adding, puts a box there the size of the others.
+  const addAt = async (e) => {
+    if (!adding || busy) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const k = photo.width / r.width;
+    const sides = beys.map((b) => b.box.side).sort((a, b) => a - b);
+    const side = sides.length ? sides[Math.floor(sides.length / 2)] : Math.min(photo.width, photo.height) * 0.3;
+    const box = { cx: (e.clientX - r.left) * k, cy: (e.clientY - r.top) * k, side };
+    setAdding(false); setBusy(true);
+    try {
+      const [b] = await look([box], photo);
+      setBeys((list) => ordered([...list, b]));
+    } catch (er) { setErr(explain(er)); }
+    setBusy(false);
+  };
+
+  const setPick = (key, pick) => setBeys((list) => list.map((b) => (b.key === key ? { ...b, pick } : b)));
+  const remove = (key) => setBeys((list) => list.filter((b) => b.key !== key));
+
+  const tooMany = beys.length > size;
+  const ready = beys.length > 0 && !tooMany && beys.every((b) => b.pick);
+
+  const use = () => {
+    onUse(beys.map((b) => ({ kind: b.pick.kind, name: b.pick.name })));
+    if (share && userId && blob.current && beys.every((b) => b.pick.part_id)) {
+      const W = photo.width, H = photo.height;
+      const boxes = beys.map(({ box, pick, vec }) => {
+        const x0 = Math.max(0, (box.cx - box.side / 2) / W), x1 = Math.min(1, (box.cx + box.side / 2) / W);
+        const y0 = Math.max(0, (box.cy - box.side / 2) / H), y1 = Math.min(1, (box.cy + box.side / 2) / H);
+        const f = (v) => +v.toFixed(4);
+        return { x: f(x0), y: f(y0), w: f(x1 - x0), h: f(y1 - y0), part_id: pick.part_id, e: Array.from(vec, (v) => +v.toFixed(5)) };
+      });
+      // Sent after the sheet closes; the deck does not wait on it.
+      submitDeckPhoto(userId, blob.current, boxes, DETECT_MODEL)
+        .then((r) => { if (r.error) console.warn("Deck photo not sent:", r.error.message); });
+    }
+    onClose();
+  };
+
+  if (stage === "camera") {
+    return (
+      <CameraSheet label="Photo of your deck" onClose={onClose} onShot={start}
+        onFile={(e) => { const f = e.target.files && e.target.files[0]; if (f) start(f); }} />
+    );
+  }
+
+  const pct = (v) => `${v * 100}%`;
+  return createPortal(
+    <SheetFrame title="Scan a deck" onClose={onClose}>
+      {stage === "working" && (
+        <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>{status}</div>
+      )}
+      {stage === "failed" && (
+        <>
+          <div style={{ color: C.magenta, fontSize: 14, lineHeight: 1.5, marginBottom: 14 }}>{err}</div>
+          <Btn onClick={() => setStage("camera")}><Camera size={15} />Try another photo</Btn>
+        </>
+      )}
+      {stage === "review" && photo && (
+        <>
+          <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 10, maxWidth: "60ch" }}>
+            {beys.length
+              ? "Check each bey's blade. Beys fill the deck top row first, left to right."
+              : "No beys were found. Lay them out apart from each other on a plain surface and photograph from above, or add them by tapping."}
+          </div>
+          <div onClick={addAt} style={{
+            position: "relative", marginBottom: 8, borderRadius: 3, overflow: "hidden",
+            cursor: adding ? "crosshair" : "default", border: `1px solid ${adding ? C.cyan : C.line}`,
+          }}>
+            <img src={photoUrl} alt="Your deck" style={{ width: "100%", display: "block" }} />
+            {beys.map((b, i) => (
+              <div key={b.key} style={{
+                position: "absolute", left: pct((b.box.cx - b.box.side / 2) / photo.width),
+                top: pct((b.box.cy - b.box.side / 2) / photo.height),
+                width: pct(b.box.side / photo.width), height: pct(b.box.side / photo.height),
+                border: `2px solid ${i < size ? C.cyan : C.magenta}`, borderRadius: "50%", pointerEvents: "none",
+              }}>
+                <span className="bx-d" style={{
+                  position: "absolute", left: -2, top: -2, background: i < size ? C.cyan : C.magenta, color: "#14020A",
+                  fontSize: 12, fontWeight: 800, padding: "0 6px", borderRadius: 3,
+                }}>{i + 1}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
+            <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} disabled={busy}
+              onClick={() => setAdding((a) => !a)}>
+              <Plus size={14} />{adding ? "Tap the missed bey…" : "Add a missed bey"}
+            </Btn>
+            <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => setStage("camera")}>
+              <Camera size={14} />Retake
+            </Btn>
+            {busy && <span style={{ fontSize: 12.5, color: C.muted }}>Looking…</span>}
+          </div>
+          {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>{err}</div>}
+          {tooMany && (
+            <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>
+              A deck holds {size}. Remove the boxes that are not beys.
+            </div>
+          )}
+
+          {beys.map((b, i) => (
+            <div key={b.key} style={{ ...card, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <img src={b.crop} alt="" style={{ width: 56, height: 56, borderRadius: 3, flexShrink: 0 }} />
+                <div className="bx-d" style={{ flex: 1, fontSize: 16, fontWeight: 700 }}>
+                  Bey {i + 1}{b.pick ? <span style={{ color: C.cyan }}> · {b.pick.name}</span> : ""}
+                </div>
+                <button onClick={() => remove(b.key)} aria-label="Not a bey" title="Not a bey" style={{
+                  background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", padding: 4,
+                }}><X size={17} /></button>
+              </div>
+              {!b.pick && !isSure(b.matches) && (
+                <div style={{ fontSize: 12.5, color: C.gold, marginBottom: 6 }}>Not sure about this one. Pick the right blade.</div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 6 }}>
+                {b.matches.map((m) => {
+                  const on = b.pick && b.pick.part_id === m.part_id;
+                  return (
+                    <button key={m.part_id} type="button" onClick={() => setPick(b.key, m)} style={{
+                      display: "flex", alignItems: "center", gap: 8, textAlign: "left", cursor: "pointer",
+                      background: on ? `${C.cyan}22` : C.base, color: C.ink, borderRadius: 3, padding: "5px 7px",
+                      border: `1px solid ${on ? C.cyan : C.line}`,
+                    }}>
+                      <PartThumb path={m.image_path} size={40} />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ display: "block", fontSize: 13.5, lineHeight: 1.2 }}>{m.name}</span>
+                        <span style={{ fontSize: 11, color: C.muted }}>
+                          {DETECT_KIND_LABEL[m.kind]} · {Math.round(m.similarity * 100)}%
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {b.pick && !b.matches.some((m) => m.part_id === b.pick.part_id) && (
+                <div style={{ fontSize: 12.5, color: C.cyan, marginTop: 6 }}>Chosen: {b.pick.name}</div>
+              )}
+              {choosing === b.key ? (
+                <BladeChooser onCancel={() => setChoosing(null)}
+                  onPick={(p) => { setPick(b.key, p); setChoosing(null); }} />
+              ) : (
+                <button onClick={() => setChoosing(b.key)} style={{
+                  background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12.5,
+                  padding: "8px 0 0", textDecoration: "underline",
+                }}>Something else</button>
+              )}
+            </div>
+          ))}
+
+          {beys.length > 0 && (
+            <label style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 13, color: C.muted, lineHeight: 1.45, margin: "6px 0 14px", cursor: "pointer" }}>
+              <input type="checkbox" checked={share} onChange={(e) => setShare(e.target.checked)} style={{ marginTop: 3 }} />
+              <span>Send this photo to help the detector learn. It is checked by hand first, and never shown publicly.</span>
+            </label>
+          )}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn tone="primary" disabled={!ready} onClick={use}>
+              <Check size={15} />{beys.length && !ready && !tooMany ? "Pick a blade for each bey" : "Use these blades"}
+            </Btn>
+            <Btn tone="ghost" onClick={onClose}>Cancel</Btn>
+          </div>
+        </>
+      )}
     </SheetFrame>,
     document.body,
   );
@@ -4593,7 +4880,7 @@ function PlayerSheet({ playerId, t, nameOf, allMatches, onClose, isAdmin, update
         </div>
 
         {(isAdmin || tournamentStarted(t) || ownDeck) && (
-          <DeckSection t={t} playerId={playerId} onSave={onSaveDeck}
+          <DeckSection t={t} playerId={playerId} onSave={onSaveDeck} meId={meId}
             canEdit={!!onSaveDeck && (isAdmin || (ownDeck && !decksLocked(t)))}
             lockedNote={ownDeck && !isAdmin && decksLocked(t)} />
         )}
@@ -7333,30 +7620,142 @@ function ProfileEditSheet({ meId, blader, onClose, onSaved }) {
   );
 }
 
-function ApprovalsSheet({ isStaff, isAwarder, onClose }) {
-  const [tab, setTab] = useState(isStaff ? "hosting" : "medals");
+function ApprovalsSheet({ isStaff, isAwarder, isPartsManager, onClose }) {
+  const [tab, setTab] = useState(isStaff ? "hosting" : isAwarder ? "medals" : "photos");
   const [hosts, setHosts] = useState(null);
   const [claims, setClaims] = useState(null);
+  const [photos, setPhotos] = useState(null);
+  const loadPhotos = () => deckPhotosWaiting().then((r) => setPhotos(r || "error"));
   useEffect(() => {
     if (isStaff) pendingHosts().then(setHosts);
     if (isAwarder) medalClaimsWaiting().then((r) => setClaims(r || "error"));
-  }, [isStaff, isAwarder]);
+    if (isPartsManager) loadPhotos();
+  }, [isStaff, isAwarder, isPartsManager]);
   const count = (x) => (Array.isArray(x) ? ` (${x.length})` : "");
+  const tabs = [
+    isStaff && { value: "hosting", label: `Hosting${count(hosts)}` },
+    isAwarder && { value: "medals", label: `Medals${count(claims)}` },
+    isPartsManager && { value: "photos", label: `Photos${count(photos)}` },
+  ].filter(Boolean);
 
   return (
     <SheetFrame title="Approvals" onClose={onClose}>
-      {isStaff && isAwarder && (
+      {tabs.length > 1 && (
         <div style={{ marginBottom: 18 }}>
-          <Segmented value={tab} onChange={setTab} tone={C.cyan} options={[
-            { value: "hosting", label: `Hosting${count(hosts)}` },
-            { value: "medals", label: `Medals${count(claims)}` },
-          ]} />
+          <Segmented value={tab} onChange={setTab} tone={C.cyan} options={tabs} />
         </div>
       )}
-      {tab === "hosting" && isStaff
-        ? <HostApprovals rows={hosts} refresh={() => pendingHosts().then(setHosts)} />
-        : <MedalApprovals rows={claims} refresh={() => medalClaimsWaiting().then((r) => setClaims(r || "error"))} />}
+      {tab === "photos" && isPartsManager
+        ? <DeckPhotoApprovals rows={photos} refresh={loadPhotos} />
+        : tab === "hosting" && isStaff
+          ? <HostApprovals rows={hosts} refresh={() => pendingHosts().then(setHosts)} />
+          : <MedalApprovals rows={claims} refresh={() => medalClaimsWaiting().then((r) => setClaims(r || "error"))} />}
     </SheetFrame>
+  );
+}
+
+/**
+ * Deck photos bladers sent in after a scan. Each box shows the blade the
+ * blader confirmed; correct it, or leave a box out. Approving turns the kept
+ * boxes into references and keeps the photo as training data; turning it
+ * down deletes it.
+ */
+function DeckPhotoApprovals({ rows, refresh }) {
+  const [links, setLinks] = useState({});
+  const [names, setNames] = useState({});
+  const [labels, setLabels] = useState({});     // photo id -> one part id (or "") per box
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  const parts = useMemo(() => detectableParts().filter((p) => p.part_id), []);
+  const nameOf = (id) => (parts.find((p) => p.part_id === id) || {}).name || "Unknown blade";
+
+  useEffect(() => {
+    if (!Array.isArray(rows)) return;
+    deckPhotoLinks(rows.map((r) => r.photo_path)).then(setLinks);
+    bladerNames(rows.map((r) => r.user_id)).then(setNames);
+    setLabels(Object.fromEntries(rows.map((r) => [r.id, r.boxes.map((b) => b.part_id)])));
+  }, [rows]);
+
+  const decide = async (r, approve) => {
+    setBusy(r.id); setErr(null);
+    const l = (labels[r.id] || []).map((x) => x || null);
+    const { error } = await reviewDeckPhoto(r.id, approve, approve ? l : null);
+    setBusy(null);
+    if (error) { setErr(error.message); return; }
+    refresh();
+  };
+
+  if (rows === null) return <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>;
+  if (rows === "error") {
+    return <div style={{ color: C.magenta, fontSize: 14 }}>Photos could not be loaded. Has detection-schema.sql been run?</div>;
+  }
+  return (
+    <>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 16, maxWidth: "58ch" }}>
+        Approve a photo only when every kept box shows the blade named under it. Approved boxes teach the
+        detector; the photo is kept privately as training data.
+      </div>
+      {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>{err}</div>}
+      {rows.length === 0 && <div style={{ color: C.muted, fontSize: 14 }}>No photos waiting.</div>}
+      {rows.map((r) => {
+        const url = links[r.photo_path];
+        const mine = labels[r.id] || [];
+        return (
+          <div key={r.id} style={{ ...card, marginBottom: 12 }}>
+            <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 8 }}>
+              From {names[r.user_id] || "a blader"} · {new Date(r.created_at).toLocaleDateString()}
+            </div>
+            {url && (
+              <div style={{ position: "relative", marginBottom: 10 }}>
+                <img src={url} alt="Deck photo" style={{ width: "100%", display: "block", borderRadius: 3 }} />
+                {r.boxes.map((b, i) => (
+                  <div key={i} style={{
+                    position: "absolute", left: `${b.x * 100}%`, top: `${b.y * 100}%`,
+                    width: `${b.w * 100}%`, height: `${b.h * 100}%`, borderRadius: "50%",
+                    border: `2px solid ${mine[i] ? C.cyan : C.muted}`,
+                  }}>
+                    <span className="bx-d" style={{
+                      position: "absolute", left: -2, top: -2, background: mine[i] ? C.cyan : C.muted, color: "#14020A",
+                      fontSize: 12, fontWeight: 800, padding: "0 6px", borderRadius: 3,
+                    }}>{i + 1}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {r.boxes.map((b, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <span className="bx-d" style={{ width: 18, fontWeight: 800, color: C.muted }}>{i + 1}</span>
+                {url && (
+                  <div style={{
+                    width: 44, height: 44, flexShrink: 0, borderRadius: 3, backgroundImage: `url("${url}")`,
+                    backgroundSize: `${100 / b.w}% ${100 / b.h}%`,
+                    backgroundPosition: `${b.w < 1 ? (b.x / (1 - b.w)) * 100 : 0}% ${b.h < 1 ? (b.y / (1 - b.h)) * 100 : 0}%`,
+                  }} />
+                )}
+                <select value={mine[i] || ""} style={{ ...inputStyle, padding: "8px 9px" }}
+                  onChange={(e) => setLabels((m) => ({ ...m, [r.id]: mine.map((x, j) => (j === i ? e.target.value : x)) }))}>
+                  <option value="">Leave this box out</option>
+                  {!parts.some((p) => p.part_id === b.part_id) && <option value={b.part_id}>{nameOf(b.part_id)}</option>}
+                  {Object.keys(DETECT_KINDS).map((k) => (
+                    <optgroup key={k} label={DETECT_KIND_LABEL[k]}>
+                      {parts.filter((p) => p.kind === k).map((p) => <option key={p.part_id} value={p.part_id}>{p.name}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              <Btn tone="primary" disabled={busy === r.id || !mine.some(Boolean)} onClick={() => decide(r, true)}>
+                <Check size={15} />Approve
+              </Btn>
+              <Btn tone="ghost" disabled={busy === r.id} onClick={() => decide(r, false)}>
+                <X size={15} />Turn down
+              </Btn>
+            </div>
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -7533,6 +7932,123 @@ function unknownNames(events) {
  * comes out, give it a picture, fix a name, and fold misspellings typed
  * into decks into the part they meant.
  */
+/**
+ * The detector's references. Each blade picture is staged ten ways - two
+ * surfaces, five turns - and each view's numbers stored, so a photo has
+ * something to match before any blader's photo is approved. Runs in this
+ * browser; the first run downloads the model.
+ */
+function DetectionPanel({ rows }) {
+  const [counts, setCounts] = useState(undefined);
+  const [run, setRun] = useState(null);       // { done, total, name } while building
+  const [msg, setMsg] = useState(null);
+  const [trying, setTrying] = useState(false);
+  const stop = useRef(false);
+  const refresh = () => refCounts(DETECT_MODEL).then(setCounts);
+  useEffect(() => { refresh(); }, []);
+
+  const blades = rows.filter((r) => DETECT_KINDS[r.kind])
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  const pictured = blades.filter((r) => r.image_path);
+  const missing = pictured.filter((r) => !(counts && counts[r.id] && counts[r.id].catalogue));
+  const photoRefs = counts ? Object.values(counts).reduce((n, c) => n + c.photos, 0) : 0;
+
+  const build = async (list) => {
+    stop.current = false; setMsg(null);
+    let failed = 0;
+    try {
+      setRun({ done: 0, total: list.length, name: "Getting the detector ready…" });
+      await loadDetector((p) => setRun((r) => ({ ...r, name: `Downloading the detector: ${Math.round(p * 100)}%` })));
+      for (let i = 0; i < list.length && !stop.current; i++) {
+        const row = list[i];
+        setRun({ done: i, total: list.length, name: row.name });
+        try {
+          const res = await fetch(partImageUrl(row.image_path));
+          if (!res.ok) throw new Error(res.status);
+          const img = await createImageBitmap(await res.blob());
+          const vecs = await embed(STAGINGS.map((s) => stagedPicture(img, s)));
+          img.close();
+          const { error } = await replaceCatalogueRefs(row.id, DETECT_MODEL, vecs.map(vectorText));
+          if (error) throw error;
+        } catch (e) { console.error(row.name, e); failed++; }
+      }
+      setMsg(stop.current ? "Stopped." : failed ? `Done, but ${failed} could not be read.` : "Done.");
+    } catch (e) {
+      console.error(e);
+      setMsg("The detector could not be loaded. Check the connection and try again.");
+    }
+    setRun(null);
+    refresh();
+  };
+
+  if (counts === undefined) return <div style={{ color: C.muted, fontSize: 14 }}>Loading…</div>;
+  if (counts === null) {
+    return (
+      <div style={{ color: C.magenta, fontSize: 14, lineHeight: 1.5 }}>
+        Detection is not set up yet. Run detection-schema.sql in Supabase.
+      </div>
+    );
+  }
+  return (
+    <>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.55, marginBottom: 14, maxWidth: "60ch" }}>
+        Bladers can scan a photo of their deck from the deck editor. Each bey is compared with what is stored
+        here. Each blade's picture is stored ten ways (two surfaces, five turns), and every photo you approve
+        adds more. Rebuild a blade after changing its picture.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 8, marginBottom: 14 }}>
+        {[
+          ["Blades with references", `${pictured.length - missing.length} / ${blades.length}`],
+          ["Without a picture", blades.length - pictured.length],
+          ["From approved photos", photoRefs],
+        ].map(([label, value]) => (
+          <div key={label} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 3, padding: "10px 12px" }}>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 3 }}>{label}</div>
+            <div className="bx-d" style={{ fontSize: 22, fontWeight: 800 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+      {run ? (
+        <div style={{ ...card, marginBottom: 14 }}>
+          <div style={{ fontSize: 13.5, marginBottom: 8 }}>{run.done} of {run.total} · {run.name}</div>
+          <div style={{ height: 6, background: C.base, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
+            <div style={{ width: `${(run.done / Math.max(1, run.total)) * 100}%`, height: "100%", background: C.cyan }} />
+          </div>
+          <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => { stop.current = true; }}>Stop</Btn>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+          <Btn tone="primary" disabled={!missing.length} onClick={() => build(missing)}>
+            <Check size={15} />{missing.length ? `Build the missing ${missing.length}` : "All built"}
+          </Btn>
+          <Btn disabled={!pictured.length} onClick={() => build(pictured)}>Rebuild all {pictured.length}</Btn>
+          <Btn tone="ghost" onClick={() => setTrying(true)}><Camera size={15} />Try the scanner</Btn>
+        </div>
+      )}
+      {msg && <div style={{ color: C.green, fontSize: 13.5, marginBottom: 12 }}>{msg}</div>}
+      {blades.map((r) => {
+        const c = counts[r.id] || { catalogue: 0, photos: 0 };
+        return (
+          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", borderBottom: `1px solid ${C.line}55` }}>
+            <PartThumb path={r.image_path} size={34} />
+            <span style={{ flex: 1, fontSize: 14 }}>{r.name}</span>
+            <span style={{ fontSize: 12, color: c.catalogue ? C.muted : C.gold }}>
+              {!r.image_path ? "no picture" : c.catalogue ? `${c.catalogue} from picture` : "not built"}
+              {c.photos ? ` · ${c.photos} from photos` : ""}
+            </span>
+            {r.image_path && !run && (
+              <button onClick={() => build([r])} title="Rebuild" style={{
+                background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12, padding: "2px 4px", textDecoration: "underline",
+              }}>Rebuild</button>
+            )}
+          </div>
+        );
+      })}
+      {trying && <DeckScanner size={3} userId={null} onUse={() => {}} onClose={() => setTrying(false)} />}
+    </>
+  );
+}
+
 function PartsSheet({ onClose, onChanged }) {
   const [rows, setRows] = useState(undefined);
   const [view, setView] = useState("catalogue");
@@ -7584,11 +8100,12 @@ function PartsSheet({ onClose, onChanged }) {
             <Segmented value={view} onChange={setView} tone={C.cyan} options={[
               { value: "catalogue", label: `Catalogue (${rows.length})` },
               { value: "unknown", label: `Unknown names${decks ? ` (${unknown.length})` : ""}` },
+              { value: "detection", label: "Detection" },
             ]} />
           </div>
           {msg && <div style={{ color: C.green, fontSize: 13.5, marginBottom: 12 }}>{msg}</div>}
 
-          {view === "catalogue" ? (
+          {view === "detection" ? <DetectionPanel rows={rows} /> : view === "catalogue" ? (
             <>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
                 {PART_KINDS.map((k) => {
@@ -8216,7 +8733,7 @@ function Directory({ profile, me, mine, all, onOpen, onNew, onSignIn, onSignOut,
               {partsManager && (
                 <Btn onClick={onParts} tone="ghost" style={{ padding: "5px 9px", fontSize: 13 }}>Parts</Btn>
               )}
-              {(profile.is_staff || awarder) && (
+              {(profile.is_staff || awarder || partsManager) && (
                 <Btn onClick={onApprovals} tone="ghost" style={{ padding: "5px 9px", fontSize: 13 }}>
                   Approvals
                   {waiting > 0 && (
@@ -8375,13 +8892,14 @@ export default function App() {
   // What is waiting on this account to decide: shown on the Approvals button.
   const isStaff = !!(profile && profile.is_staff);
   const countWaiting = async () => {
-    const [h, m] = await Promise.all([
+    const [h, m, p] = await Promise.all([
       isStaff ? pendingHosts().then((r) => r.length) : 0,
       awarder ? medalClaimCount() : 0,
+      partsManager ? deckPhotoCount() : 0,
     ]);
-    setWaiting(h + m);
+    setWaiting(h + m + p);
   };
-  useEffect(() => { if (isStaff || awarder) countWaiting(); else setWaiting(0); }, [isStaff, awarder]);
+  useEffect(() => { if (isStaff || awarder || partsManager) countWaiting(); else setWaiting(0); }, [isStaff, awarder, partsManager]);
 
   const openEvent = (id) => {
     history.pushState({}, "", "?t=" + id);
@@ -8483,7 +9001,7 @@ export default function App() {
         <PartsSheet onClose={() => setSheet(null)} onChanged={useParts} />
       )}
       {sheet === "approvals" && (
-        <ApprovalsSheet isStaff={isStaff} isAwarder={awarder}
+        <ApprovalsSheet isStaff={isStaff} isAwarder={awarder} isPartsManager={partsManager}
           onClose={() => { setSheet(null); setBladerVersion((v) => v + 1); countWaiting(); }} />
       )}
       {sheet === "bladers" && (

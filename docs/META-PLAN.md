@@ -74,7 +74,28 @@ Public, with two tables and a filter: **All tournaments / Official only**.
   combos are credited for the battles they actually won.
 - Automatic blade detection from a photo.
 
-## Deck photo detection (in the browser, free)
+## Deck photo detection (in the browser, free) — built
+
+Built as below, with these specifics:
+
+- Model: `onnx-community/dinov2-small`, 8-bit (24MB), via transformers.js in
+  the browser, loaded only when a scan starts. Each bey becomes 768 numbers:
+  the class token and the mean patch token, each scaled to length 1.
+- References are built from Parts → Detection, in the parts manager's
+  browser: each blade picture on two surfaces at five turns (10 per blade).
+  About 3 seconds a blade.
+- Matching is `match_parts` in Supabase (pgvector, cosine), best reference
+  per blade. A blade is pre-picked only when it scores at least 0.6 and leads
+  the next blade by 0.03; otherwise the blader picks.
+- Test on catalogue pictures staged on unseen surfaces, angles and shadows:
+  24 of 24 beys found and named. Real photos will score lower until
+  approved photos are added.
+- Photos sent in go to Approvals → Photos. Labels can be corrected or a box
+  left out; approved boxes become references, and the photo is kept with its
+  boxes as training data. At most 10 waiting per account.
+- SQL: `detection-schema.sql`, tests in `detection-permission-tests.sql`.
+
+The original design:
 
 - Done first: part pickers show each match's picture and name, and decks are
   shown with part pictures beside the text.
