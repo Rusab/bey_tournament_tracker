@@ -24,6 +24,9 @@ self.addEventListener("fetch", (e) => {
 
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // leave Supabase alone
+  // The deck detector's model and runtime are large and kept by the
+  // detector itself; caching them here too would double that.
+  if (url.pathname.startsWith("/models/") || url.pathname.startsWith("/ort/")) return;
 
   e.respondWith(
     fetch(req)

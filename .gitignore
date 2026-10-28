@@ -5,3 +5,6 @@ dist
 
 # Part pictures fetched for the catalogue, uploaded from the Parts screen, never committed
 part-images/
+
+# Copied from node_modules by vite.config.js
+public/ort/

@@ -11,11 +11,12 @@
  *   3. The database compares those numbers with stored references of
  *      every blade (match_parts) and names the closest.
  *
- * The model (24MB) downloads from Hugging Face the first time and is kept
+ * The model (24MB) downloads from this site the first time and is kept
  * by the browser after that. Nothing here runs until a scan is started.
  */
 
-const MODEL_ID = "onnx-community/dinov2-small";
+// onnx-community/dinov2-small, served from this site (public/models).
+const MODEL_ID = "dinov2-small";
 /** Stored with every reference; change it if the numbers ever change meaning. */
 export const DETECT_MODEL = "dinov2-small-q8-v1";
 export const DETECT_SIZE = 224;
@@ -310,7 +311,11 @@ export function loadDetector(onProgress) {
   if (!loading) {
     loading = (async () => {
       const tf = await import("@huggingface/transformers");
-      tf.env.allowLocalModels = false;
+      // Everything from this site: no Hugging Face, no CDN.
+      tf.env.allowRemoteModels = false;
+      tf.env.allowLocalModels = true;
+      tf.env.localModelPath = "/models/";
+      tf.env.backends.onnx.wasm.wasmPaths = "/ort/";
       const model = await tf.AutoModel.from_pretrained(MODEL_ID, {
         dtype: "q8", device: "wasm",
         progress_callback: (p) => {
