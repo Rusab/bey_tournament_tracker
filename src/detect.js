@@ -1,9 +1,9 @@
 /*
  * Deck photo detection, all in the browser.
  *
- *   1. findBeys: each bey is found as a circle, on any background - a
- *      table, a mat, the slots of a deck case. Its size is then chosen by
- *      trying a few crops and keeping the one the model matches best.
+ *   1. The blader taps each bey (or drags from its middle to its edge).
+ *      For a tap, a few crop sizes are tried and the model's best match
+ *      picks the size.
  *   2. embed: each bey's square crop goes through DINOv2-small and comes
  *      out as 768 numbers (the class token and the average of the patch
  *      tokens, each scaled to length 1). Similar-looking blades give
@@ -40,197 +40,31 @@ export const CLEAR_LEAD = 0.03;
 export const isSure = (matches) => !!(matches && matches[0] && matches[0].similarity >= SURE_ENOUGH
   && (!matches[1] || matches[0].similarity - matches[1].similarity >= CLEAR_LEAD));
 
-/* ----------------------------------------------------------- finding beys */
+/* ----------------------------------------------------------- marking beys */
 
 /*
- * A bey seen from above is a circle, whatever it sits on - a table, a mat,
- * the slots of a deck case. So beys are found as circles: every edge in the
- * photo votes for the centres of the circles it could lie on (a Hough
- * transform), and the strongest centres are the candidates. A deck's beys
- * are all about the same size in one photo, which picks the right circles
- * out from the rest: a case's corners, a sleeve's checks, the small round
- * chip in the middle of each bey.
+ * The blader marks each bey: a tap on its middle, or a drag from its middle
+ * to its edge. A drag gives the size; for a tap, a few sizes are tried and
+ * the model's best match decides.
  */
-
-/** A 3×3 box blur. */
-function box(src, w, h) {
-  const out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let s = 0, n = 0;
-      for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) {
-        for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) { s += src[yy * w + xx]; n++; }
-      }
-      out[y * w + x] = s / n;
-    }
-  }
-  return out;
-}
-const blur = (src, w, h) => box(box(src, w, h), w, h);
 
 /**
- * Circles in RGBA pixels, strongest first: { cx, cy, r, score }. score is
- * roughly the share of the circle's edge that the photo backs up.
+ * The crops to try for a tapped bey at point {x, y}: around the size of the
+ * beys already marked, or else a spread of likely sizes. Never so big that
+ * it reaches past halfway to another bey (beys do not overlap).
  */
-export function findCirclesIn(px, w, h) {
-  const n = w * h;
-  const gray = new Float32Array(n);
-  for (let i = 0; i < n; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
-  const g = blur(gray, w, h);
-
-  // Edges, and which way each one faces.
-  const gx = new Float32Array(n), gy = new Float32Array(n), mag = new Float32Array(n);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const a = g[i - w - 1], b = g[i - w], c = g[i - w + 1], d = g[i - 1], f = g[i + 1], p = g[i + w - 1], q = g[i + w], r = g[i + w + 1];
-      gx[i] = c + 2 * f + r - a - 2 * d - p;
-      gy[i] = p + 2 * q + r - a - 2 * b - c;
-      mag[i] = Math.hypot(gx[i], gy[i]);
-    }
-  }
-  const sorted = Float32Array.from(mag).sort();
-  // A share of the strongest edges, not a fixed share of all pixels: a
-  // checked cloth is nearly all edges, and would push a silver blade's softer
-  // outline out. Edges that are not round never pile up on one centre.
-  const cut = Math.max(16, 0.2 * sorted[Math.floor(n * 0.98)]);
-
-  // Votes, one plane per radius. An edge votes on both sides of itself:
-  // a bey can be lighter or darker than what is around it.
-  const m = Math.min(w, h);
-  const rMin = Math.max(4, Math.round(m * 0.06)), rMax = Math.round(m * 0.34);
-  const step = Math.max(1, Math.round((rMax - rMin) / 28));
-  const radii = [];
-  for (let r = rMin; r <= rMax; r += step) radii.push(r);
-  const planes = radii.map(() => new Float32Array(n));
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (mag[i] < cut) continue;
-      const ux = gx[i] / mag[i], uy = gy[i] / mag[i];
-      radii.forEach((r, k) => {
-        for (const s of [1, -1]) {
-          const cx = Math.round(x + s * r * ux), cy = Math.round(y + s * r * uy);
-          if (cx >= 0 && cy >= 0 && cx < w && cy < h) planes[k][cy * w + cx] += 1;
-        }
-      });
-    }
-  }
-
-  // A jagged blade's votes scatter, more the bigger it is; blurring gathers
-  // them, with more passes for bigger circles. Each plane is then scaled so
-  // a perfect circle scores about 1, whatever its size or blur.
-  const passesFor = (r) => 2 + Math.floor(r / 14);
-  const gain = {};
-  const scored = planes.map((pl, k) => {
-    const passes = passesFor(radii[k]);
-    if (!gain[passes]) {
-      // What one vote is worth at its own centre after this much blurring.
-      const S = 2 * passes + 3, dot = new Float32Array(S * S);
-      dot[(S * S - 1) / 2] = 1;
-      let d = dot;
-      for (let p = 0; p < passes; p++) d = box(d, S, S);
-      gain[passes] = 1 / d[(S * S - 1) / 2];
-    }
-    let b = pl;
-    for (let p = 0; p < passes; p++) b = box(b, w, h);
-    const per = gain[passes] / (2 * Math.PI * radii[k]);
-    for (let i = 0; i < n; i++) b[i] *= per;
-    return b;
-  });
-
-  // Peaks: higher than everything near them, at their own size and the next.
-  const found = [];
-  for (let k = 0; k < radii.length; k++) {
-    const pl = scored[k];
-    for (let y = 2; y < h - 2; y++) {
-      for (let x = 2; x < w - 2; x++) {
-        const i = y * w + x, v = pl[i];
-        if (v < 0.2) continue;
-        let peak = true;
-        for (let kk = Math.max(0, k - 1); kk <= Math.min(radii.length - 1, k + 1) && peak; kk++) {
-          const o = scored[kk];
-          for (let dy = -2; dy <= 2 && peak; dy++) {
-            for (let dx = -2; dx <= 2; dx++) {
-              if ((dx || dy || kk !== k) && o[i + dy * w + dx] > v) { peak = false; break; }
-            }
-          }
-        }
-        if (peak) found.push({ cx: x + 0.5, cy: y + 0.5, r: radii[k], score: v });
-      }
-    }
-  }
-  found.sort((a, b) => b.score - a.score);
-
-  // The same circle found at neighbouring sizes and spots counts once.
-  const out = [];
-  for (const c of found) {
-    if (out.some((o) => Math.hypot(o.cx - c.cx, o.cy - c.cy) < 0.4 * Math.min(o.r, c.r)
-      && Math.max(o.r, c.r) / Math.min(o.r, c.r) < 1.3)) continue;
-    out.push(c);
-    if (out.length >= 80) break;
-  }
-  return out;
-}
-
-const overlap = (a, b) => Math.hypot(a.cx - b.cx, a.cy - b.cy) < 0.85 * (a.r + b.r);
-
-/**
- * From the circles, the deck: the set of up to `count` circles of about one
- * size, not overlapping, that the photo backs up best.
- *
- * Where each bey is comes out reliably; how big it is less so - a ring
- * inside a bey, or its shadow, can be the stronger circle. sizeOptions and
- * the model settle the size.
- */
-export function pickDeck(circles, count) {
-  const sets = circles.slice(0, 30).map((anchor) => {
-    const chosen = [];
-    for (const c of circles) {
-      // Wide enough for one bey found by its rim and another by its body; a
-      // centre chip is under half a bey across, so it stays out.
-      if (c.r < anchor.r * 0.72 || c.r > anchor.r * 1.4) continue;
-      if (chosen.some((o) => overlap(o, c))) continue;
-      chosen.push(c);
-      if (chosen.length >= count) break;
-    }
-    // Faint circles riding along with strong ones are clutter.
-    const top = Math.max(...chosen.map((c) => c.score));
-    const kept = chosen.filter((c) => c.score >= 0.45 * top);
-    return { circles: kept, score: kept.reduce((s, c) => s + c.score, 0), r: anchor.r };
-  });
-  if (!sets.length) return [];
-  sets.sort((a, b) => b.score - a.score);
-  return sets[0].circles;
-}
-
-/** How much bigger than the circle found a bey might really be. */
-export const SIZE_STEPS = [1, 1.4, 2, 2.8];
-
-/**
- * The crops worth trying for one bey: the circle found and bigger ones, as
- * far as the nearest other bey allows (beys do not overlap). The model's
- * best match picks among them.
- */
-export function sizeOptions(box, others) {
-  const near = Math.min(Infinity, ...others.filter((o) => o !== box)
-    .map((o) => Math.hypot(o.cx - box.cx, o.cy - box.cy)));
+export function tapOptions(point, minDim, others = []) {
+  const near = Math.min(Infinity, ...others.map((o) => Math.hypot(o.cx - point.x, o.cy - point.y)));
   const most = near * CROP_MARGIN;
+  const sides = others.map((o) => o.side).sort((a, b) => a - b);
+  const base = sides.length ? sides[Math.floor(sides.length / 2)] : 0;
+  const steps = base ? [0.8, 1, 1.25].map((k) => base * k) : [0.18, 0.24, 0.32, 0.42, 0.55].map((k) => k * minDim);
   const out = [];
-  for (const k of SIZE_STEPS) {
-    const side = Math.min(box.side * k, most);
-    if (!out.length || side > out[out.length - 1].side * 1.12) out.push({ cx: box.cx, cy: box.cy, side });
+  for (const want of steps) {
+    const side = Math.min(want, most);
+    if (!out.length || side > out[out.length - 1].side * 1.08) out.push({ cx: point.x, cy: point.y, side });
   }
   return out;
-}
-
-/**
- * Finds beys in RGBA pixels. Returns square boxes { cx, cy, side } in those
- * pixels, in reading order, at most `count` of them.
- */
-export function findBeysIn(px, w, h, count = 3) {
-  return readingOrder(pickDeck(findCirclesIn(px, w, h), count)
-    .map((c) => ({ cx: c.cx, cy: c.cy, side: 2 * c.r * CROP_MARGIN })));
 }
 
 /** Top row first, left to right; a bey counts as a new row below half a bey's height. */
@@ -263,17 +97,6 @@ export async function loadPhoto(blob, maxDim = 1600) {
   c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
   bmp.close();
   return c;
-}
-
-/** findBeysIn on a photo canvas, worked at 320px and handed back at full size. */
-export function findBeys(photo, count = 3) {
-  const scale = Math.min(1, 320 / Math.max(photo.width, photo.height));
-  const w = Math.max(1, Math.round(photo.width * scale)), h = Math.max(1, Math.round(photo.height * scale));
-  const small = canvasOf(w, h);
-  const g = small.getContext("2d", { willReadFrequently: true });
-  g.drawImage(photo, 0, 0, w, h);
-  return findBeysIn(g.getImageData(0, 0, w, h).data, w, h, count)
-    .map((b) => ({ cx: b.cx / scale, cy: b.cy / scale, side: b.side / scale }));
 }
 
 /**

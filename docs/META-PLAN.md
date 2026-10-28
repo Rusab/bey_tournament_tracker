@@ -78,6 +78,13 @@ Public, with two tables and a filter: **All tournaments / Official only**.
 
 Built as below, with these specifics:
 
+- Finding beys: the blader taps each bey on the photo (or drags from its
+  middle to its edge). Automatic finding was tried (background separation,
+  then circle detection) and dropped in favour of taps. For a tap, a few crop
+  sizes are tried and the best match decides. Only the bey's circle is
+  matched; the rest of the crop is blanked out.
+- A small detector (YOLO-style) can replace the taps later, trained on
+  approved deck photos, which are stored with their boxes.
 - Model: `onnx-community/dinov2-small`, 8-bit (24MB), via transformers.js in
   the browser, loaded only when a scan starts. Each bey becomes 768 numbers:
   the class token and the mean patch token, each scaled to length 1.
