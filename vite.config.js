@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { copyFileSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 
 /*
  * The deck detector runs from this site alone: the model sits in
@@ -22,6 +22,16 @@ const detectorRuntime = {
       try { same = statSync(to).size === statSync(from).size; } catch { same = false; }
       if (!same) copyFileSync(from, to);
     }
+  },
+  // The dev server will not let code import a file from public/, so it
+  // hands these two over itself.
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      const name = (req.url || "").split("?")[0].replace(/^\/ort\//, "");
+      if (!req.url.startsWith("/ort/") || !ORT_FILES.includes(name)) return next();
+      res.setHeader("Content-Type", name.endsWith(".mjs") ? "text/javascript" : "application/wasm");
+      res.end(readFileSync(`node_modules/@huggingface/transformers/dist/${name}`));
+    });
   },
   generateBundle(_, bundle) {
     for (const name of Object.keys(bundle)) {

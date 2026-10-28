@@ -33,7 +33,7 @@ import {
 import { seriesRanking } from "./series.js";
 import {
   DETECT_KINDS, DETECT_MODEL, isSure, STAGINGS, loadDetector, loadPhoto, findBeys, readingOrder,
-  cropBox, embed, vectorText, stagedPicture,
+  cropBox, embed, vectorText, stagedPicture, sizeOptions, CROP_MARGIN,
 } from "./detect.js";
 import { renderRankingImage } from "./rankingImage.js";
 
@@ -4605,17 +4605,27 @@ function DeckScanner({ size, userId, onUse, onClose }) {
   useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl); }, [photoUrl]);
 
   // Crops, numbers and matches for some boxes of the photo.
-  const look = async (boxes, canvas) => {
-    const crops = boxes.map((b) => cropBox(canvas, b));
+  // Each box is tried at a few sizes (unless drawn by hand, sized already),
+  // and the size whose crop looks most like a blade is kept.
+  const look = async (boxes, canvas, neighbours = boxes, sized = false) => {
+    const options = boxes.map((b) => (sized ? [b] : sizeOptions(b, neighbours)));
+    const flat = options.flat();
+    const crops = flat.map((b) => cropBox(canvas, b));
     const vecs = await embed(crops);
     const found = await Promise.all(vecs.map((v) => matchParts(vectorText(v), DETECT_MODEL, 3)));
     if (found.some((m) => m === null)) throw new Error("setup");
     if (found.some((m) => m.length === 0)) throw new Error("no-refs");
-    return boxes.map((box, i) => ({
-      key: Math.random().toString(36).slice(2), box, vec: vecs[i],
-      crop: crops[i].toDataURL("image/jpeg", 0.8), matches: found[i],
-      pick: isSure(found[i]) ? found[i][0] : null,
-    }));
+    let at = 0;
+    return options.map((opts) => {
+      let best = at;
+      for (let i = at; i < at + opts.length; i++) if (found[i][0].similarity > found[best][0].similarity) best = i;
+      at += opts.length;
+      return {
+        key: Math.random().toString(36).slice(2), box: flat[best], vec: vecs[best],
+        crop: crops[best].toDataURL("image/jpeg", 0.8), matches: found[best],
+        pick: isSure(found[best]) ? found[best][0] : null,
+      };
+    });
   };
   const ordered = (list) => readingOrder(list.map((b) => ({ ...b.box, bey: b }))).map((x) => x.bey);
   const explain = (e) => (e.message === "setup"
@@ -4632,7 +4642,7 @@ function DeckScanner({ size, userId, onUse, onClose }) {
       blob.current = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
       setPhoto(canvas);
       setPhotoUrl(URL.createObjectURL(blob.current));
-      const boxes = findBeys(canvas).slice(0, size + 2);
+      const boxes = findBeys(canvas, size);
       setStatus("Getting the detector ready…");
       await loadDetector((p) => setStatus(`Downloading the detector (about 24MB, only the first time): ${Math.round(p * 100)}%`));
       setStatus(`Looking at ${boxes.length} bey${boxes.length === 1 ? "" : "s"}…`);
@@ -4646,16 +4656,36 @@ function DeckScanner({ size, userId, onUse, onClose }) {
   };
 
   // A tap on the photo, while adding, puts a box there the size of the others.
-  const addAt = async (e) => {
-    if (!adding || busy) return;
+  // Adding a missed bey: drag from its middle to its edge. A plain tap
+  // works too; the model then picks the size.
+  const [drawing, setDrawing] = useState(null);     // { cx, cy, side } in photo pixels
+  const toPhoto = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const k = photo.width / r.width;
+    return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
+  };
+  const drawStart = (e) => {
+    if (!adding || busy) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = toPhoto(e);
+    setDrawing({ cx: p.x, cy: p.y, side: 0 });
+  };
+  const drawMove = (e) => {
+    if (!drawing) return;
+    const p = toPhoto(e);
+    setDrawing((d) => ({ ...d, side: 2 * Math.hypot(p.x - d.cx, p.y - d.cy) * CROP_MARGIN }));
+  };
+  const drawEnd = async () => {
+    if (!drawing) return;
+    const d = drawing;
+    setDrawing(null); setAdding(false); setBusy(true);
+    const tapped = d.side < Math.min(photo.width, photo.height) * 0.06;
     const sides = beys.map((b) => b.box.side).sort((a, b) => a - b);
-    const side = sides.length ? sides[Math.floor(sides.length / 2)] : Math.min(photo.width, photo.height) * 0.3;
-    const box = { cx: (e.clientX - r.left) * k, cy: (e.clientY - r.top) * k, side };
-    setAdding(false); setBusy(true);
+    const box = tapped
+      ? { ...d, side: (sides.length ? sides[Math.floor(sides.length / 2)] : Math.min(photo.width, photo.height) * 0.25) * 0.75 }
+      : d;
     try {
-      const [b] = await look([box], photo);
+      const [b] = await look([box], photo, [...beys.map((x) => x.box), box], !tapped);
       setBeys((list) => ordered([...list, b]));
     } catch (er) { setErr(explain(er)); }
     setBusy(false);
@@ -4710,11 +4740,20 @@ function DeckScanner({ size, userId, onUse, onClose }) {
               ? "Check each bey's blade. Beys fill the deck top row first, left to right."
               : "No beys were found. Lay them out apart from each other on a plain surface and photograph from above, or add them by tapping."}
           </div>
-          <div onClick={addAt} style={{
+          <div onPointerDown={drawStart} onPointerMove={drawMove} onPointerUp={drawEnd} onPointerCancel={() => setDrawing(null)} style={{
             position: "relative", marginBottom: 8, borderRadius: 3, overflow: "hidden",
+            touchAction: adding ? "none" : "auto",
             cursor: adding ? "crosshair" : "default", border: `1px solid ${adding ? C.cyan : C.line}`,
           }}>
-            <img src={photoUrl} alt="Your deck" style={{ width: "100%", display: "block" }} />
+            <img src={photoUrl} alt="Your deck" draggable={false} style={{ width: "100%", display: "block" }} />
+            {drawing && drawing.side > 0 && (
+              <div style={{
+                position: "absolute", left: pct((drawing.cx - drawing.side / 2) / photo.width),
+                top: pct((drawing.cy - drawing.side / 2) / photo.height),
+                width: pct(drawing.side / photo.width), height: pct(drawing.side / photo.height),
+                border: `2px dashed ${C.gold}`, borderRadius: "50%", pointerEvents: "none",
+              }} />
+            )}
             {beys.map((b, i) => (
               <div key={b.key} style={{
                 position: "absolute", left: pct((b.box.cx - b.box.side / 2) / photo.width),
@@ -4732,7 +4771,7 @@ function DeckScanner({ size, userId, onUse, onClose }) {
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
             <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} disabled={busy}
               onClick={() => setAdding((a) => !a)}>
-              <Plus size={14} />{adding ? "Tap the missed bey…" : "Add a missed bey"}
+              <Plus size={14} />{adding ? "Drag from its middle to its edge…" : "Add a missed bey"}
             </Btn>
             <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => setStage("camera")}>
               <Camera size={14} />Retake

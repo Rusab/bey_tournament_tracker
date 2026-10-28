@@ -4,7 +4,7 @@
  *
  *   node tests/detect.test.mjs
  */
-import { findBeysIn, readingOrder, poolTokens, vectorText } from "../src/detect.js";
+import { findBeysIn, readingOrder, poolTokens, vectorText, sizeOptions } from "../src/detect.js";
 
 let fails = 0;
 const check = (label, got, want) => {
@@ -85,6 +85,42 @@ const near = (box, b) => Math.hypot(box.cx - b.x, box.cy - b.y) < b.r * 0.3
   ];
   const got = findBeysIn(photo(320, 220, beys), 320, 220);
   check("a crumb is not a bey", got.length, 2);
+}
+
+{
+  // A deck case on a cluttered desk, like a real photo: a checked cloth on
+  // the left, a red tray beside the case, the case's dark frame, and three
+  // beys in a column, each with a bright round chip in the middle.
+  const W = 240, H = 320;
+  const px = new Uint8ClampedArray(W * H * 4);
+  const beys = [{ x: 120, y: 85, r: 34 }, { x: 120, y: 165, r: 32 }, { x: 122, y: 245, r: 32 }];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let c = [225, 225, 222];                                                       // desk
+      if (x < 50) c = ((Math.floor(x / 6) + Math.floor(y / 6)) % 2) ? [40, 50, 60] : [200, 200, 205];  // cloth
+      if (x > 165 && x < 230 && y > 50 && y < 290) c = [215, 30, 30];               // red tray
+      if (x > 78 && x < 162 && y > 40 && y < 292) c = (x < 84 || x > 156 || y < 46 || y > 286) ? [30, 30, 30] : [235, 235, 238];  // case
+      for (const b of beys) {
+        const d = Math.hypot(x - b.x, y - b.y), a = Math.atan2(y - b.y, x - b.x);
+        if (d < b.r * (0.9 + 0.1 * Math.sin(a * 6))) c = [150, 150, 155];           // jagged silver blade
+        if (d < b.r * 0.6) c = [90, 40, 140];
+        if (d < b.r * 0.35) c = [245, 245, 250];                                     // the chip
+      }
+      const i = (y * W + x) * 4, nz = (rand() - 0.5) * 12;
+      px[i] = c[0] + nz; px[i + 1] = c[1] + nz; px[i + 2] = c[2] + nz; px[i + 3] = 255;
+    }
+  }
+  const got = findBeysIn(px, W, H, 3);
+  check("in a deck case on a busy desk, three beys", got.length, 3);
+  check("each found at its centre, top to bottom",
+    got.map((g, i) => Math.hypot(g.cx - beys[i].x, g.cy - beys[i].y) < 6), [true, true, true]);
+  // Its size may be a ring inside it; the sizes tried must reach the whole bey
+  // without running into the next one.
+  const opts = got.map((g) => sizeOptions(g, got));
+  check("a size tried covers each whole bey",
+    opts.map((o, i) => o.some((b) => b.side >= beys[i].r * 2 && b.side <= beys[i].r * 2 * 1.45)), [true, true, true]);
+  check("no size tried reaches the next bey's centre",
+    opts.every((o) => o.every((b) => b.side / 2 / 1.15 <= 80)), true);
 }
 
 check("reading order: rows, then left to right",
