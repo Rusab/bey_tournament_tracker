@@ -4659,10 +4659,26 @@ function DeckScanner({ size, userId, onUse, onClose }) {
   // Adding a missed bey: drag from its middle to its edge. A plain tap
   // works too; the model then picks the size.
   const [drawing, setDrawing] = useState(null);     // { cx, cy, side } in photo pixels
+  const [redraw, setRedraw] = useState(null);       // the bey whose circle is being drawn again
+  const photoBox = useRef(null);
+  const stopDrawing = () => { setAdding(false); setRedraw(null); setDrawing(null); };
+  // Redrawing a bey's circle: the next drag on the photo replaces it.
+  // From a bey's card the photo may be off screen, so it is brought into view.
+  const startRedraw = (key, scroll = false) => {
+    setRedraw(key); setAdding(true);
+    if (scroll && photoBox.current) photoBox.current.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   const toPhoto = (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const k = photo.width / r.width;
     return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
+  };
+  // A tap inside a circle, when not drawing, picks that bey to redraw.
+  const tapPhoto = (e) => {
+    if (adding || busy) return;
+    const p = toPhoto(e);
+    const hit = beys.find((b) => Math.hypot(p.x - b.box.cx, p.y - b.box.cy) < b.box.side / 2);
+    if (hit) startRedraw(hit.key);
   };
   const drawStart = (e) => {
     if (!adding || busy) return;
@@ -4677,16 +4693,19 @@ function DeckScanner({ size, userId, onUse, onClose }) {
   };
   const drawEnd = async () => {
     if (!drawing) return;
-    const d = drawing;
-    setDrawing(null); setAdding(false); setBusy(true);
+    const d = drawing, replacing = redraw;
+    stopDrawing(); setBusy(true);
+    const rest = beys.filter((b) => b.key !== replacing);
+    const old = beys.find((b) => b.key === replacing);
     const tapped = d.side < Math.min(photo.width, photo.height) * 0.06;
-    const sides = beys.map((b) => b.box.side).sort((a, b) => a - b);
-    const box = tapped
-      ? { ...d, side: (sides.length ? sides[Math.floor(sides.length / 2)] : Math.min(photo.width, photo.height) * 0.25) * 0.75 }
-      : d;
+    const sides = rest.map((b) => b.box.side).sort((a, b) => a - b);
+    // A tap rather than a drag: a starting size, and the model picks from there.
+    const box = !tapped ? d
+      : old ? { ...d, side: old.box.side * 0.75 }
+        : { ...d, side: (sides.length ? sides[Math.floor(sides.length / 2)] : Math.min(photo.width, photo.height) * 0.25) * 0.75 };
     try {
-      const [b] = await look([box], photo, [...beys.map((x) => x.box), box], !tapped);
-      setBeys((list) => ordered([...list, b]));
+      const [b] = await look([box], photo, [...rest.map((x) => x.box), box], !tapped);
+      setBeys((list) => ordered([...list.filter((x) => x.key !== replacing), b]));
     } catch (er) { setErr(explain(er)); }
     setBusy(false);
   };
@@ -4737,10 +4756,10 @@ function DeckScanner({ size, userId, onUse, onClose }) {
         <>
           <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 10, maxWidth: "60ch" }}>
             {beys.length
-              ? "Check each bey's blade. Beys fill the deck top row first, left to right."
+              ? "Check each bey's blade. If a circle is off, tap it and draw it again. Beys fill the deck top row first, left to right."
               : "No beys were found. Lay them out apart from each other on a plain surface and photograph from above, or add them by tapping."}
           </div>
-          <div onPointerDown={drawStart} onPointerMove={drawMove} onPointerUp={drawEnd} onPointerCancel={() => setDrawing(null)} style={{
+          <div ref={photoBox} onClick={tapPhoto} onPointerDown={drawStart} onPointerMove={drawMove} onPointerUp={drawEnd} onPointerCancel={() => setDrawing(null)} style={{
             position: "relative", marginBottom: 8, borderRadius: 3, overflow: "hidden",
             touchAction: adding ? "none" : "auto",
             cursor: adding ? "crosshair" : "default", border: `1px solid ${adding ? C.cyan : C.line}`,
@@ -4759,7 +4778,8 @@ function DeckScanner({ size, userId, onUse, onClose }) {
                 position: "absolute", left: pct((b.box.cx - b.box.side / 2) / photo.width),
                 top: pct((b.box.cy - b.box.side / 2) / photo.height),
                 width: pct(b.box.side / photo.width), height: pct(b.box.side / photo.height),
-                border: `2px solid ${i < size ? C.cyan : C.magenta}`, borderRadius: "50%", pointerEvents: "none",
+                border: `2px ${redraw === b.key ? "dashed" : "solid"} ${redraw === b.key ? C.gold : i < size ? C.cyan : C.magenta}`,
+                borderRadius: "50%", pointerEvents: "none", opacity: redraw === b.key && drawing ? 0.35 : 1,
               }}>
                 <span className="bx-d" style={{
                   position: "absolute", left: -2, top: -2, background: i < size ? C.cyan : C.magenta, color: "#14020A",
@@ -4770,14 +4790,21 @@ function DeckScanner({ size, userId, onUse, onClose }) {
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
             <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} disabled={busy}
-              onClick={() => setAdding((a) => !a)}>
-              <Plus size={14} />{adding ? "Drag from its middle to its edge…" : "Add a missed bey"}
+              onClick={() => (adding ? stopDrawing() : setAdding(true))}>
+              {adding ? <X size={14} /> : <Plus size={14} />}
+              {adding ? "Cancel drawing" : "Add a missed bey"}
             </Btn>
             <Btn tone="ghost" style={{ padding: "6px 10px", fontSize: 13 }} onClick={() => setStage("camera")}>
               <Camera size={14} />Retake
             </Btn>
             {busy && <span style={{ fontSize: 12.5, color: C.muted }}>Looking…</span>}
           </div>
+          {adding && (
+            <div style={{ color: C.gold, fontSize: 13, marginTop: -8, marginBottom: 12 }}>
+              Put your finger on the middle of {redraw ? `bey ${beys.findIndex((b) => b.key === redraw) + 1}` : "the missed bey"} and
+              drag out to its edge.
+            </div>
+          )}
           {err && <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>{err}</div>}
           {tooMany && (
             <div style={{ color: C.magenta, fontSize: 13, marginBottom: 10 }}>
@@ -4792,6 +4819,10 @@ function DeckScanner({ size, userId, onUse, onClose }) {
                 <div className="bx-d" style={{ flex: 1, fontSize: 16, fontWeight: 700 }}>
                   Bey {i + 1}{b.pick ? <span style={{ color: C.cyan }}> · {b.pick.name}</span> : ""}
                 </div>
+                <button onClick={() => startRedraw(b.key, true)} disabled={busy} title="Draw this circle again" style={{
+                  background: "none", border: "none", color: redraw === b.key ? C.gold : C.muted, cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 4, padding: 4, fontSize: 12.5,
+                }}><Pencil size={14} />Redraw</button>
                 <button onClick={() => remove(b.key)} aria-label="Not a bey" title="Not a bey" style={{
                   background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", padding: 4,
                 }}><X size={17} /></button>
