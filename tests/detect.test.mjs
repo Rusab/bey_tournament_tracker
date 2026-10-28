@@ -1,10 +1,10 @@
 /*
- * Deck photo detection: the sizes tried for a tapped bey, the order beys
+ * Deck photo detection: the circle for a tapped bey, the order beys
  * fill a deck, and the numbers sent to the database.
  *
  *   node tests/detect.test.mjs
  */
-import { tapOptions, readingOrder, poolTokens, vectorText, CROP_MARGIN } from "../src/detect.js";
+import { tapBox, FIRST_TAP, readingOrder, poolTokens, vectorText, CROP_MARGIN } from "../src/detect.js";
 
 let fails = 0;
 const check = (label, got, want) => {
@@ -14,24 +14,20 @@ const check = (label, got, want) => {
 };
 
 {
-  const first = tapOptions({ x: 500, y: 400 }, 1000);
-  check("the first tap tries a spread of sizes", first.map((b) => Math.round(b.side)), [180, 240, 320, 420, 550]);
-  check("all centred on the tap", first.every((b) => b.cx === 500 && b.cy === 400), true);
+  const first = tapBox({ x: 500, y: 400 }, 1000);
+  check("the first tap takes a set share of the photo, centred on the tap",
+    [first.cx, first.cy, Math.round(first.side)], [500, 400, Math.round(FIRST_TAP * 1000 * CROP_MARGIN)]);
 }
 
 {
-  const marked = [{ cx: 200, cy: 300, side: 250 }, { cx: 500, cy: 300, side: 270 }];
-  const next = tapOptions({ x: 800, y: 300 }, 1000, marked);
-  check("later taps try sizes around the beys already marked", next.map((b) => Math.round(b.side)), [216, 270, 338]);
+  const marked = [{ cx: 200, cy: 300, side: 250 }, { cx: 500, cy: 300, side: 270 }, { cx: 800, cy: 300, side: 260 }];
+  check("later taps take the size of the beys already marked", tapBox({ x: 500, y: 700 }, 1000, marked).side, 260);
 }
 
 {
-  // Beys in a case, 220 apart: no crop may reach past halfway to the next one.
-  const marked = [{ cx: 400, cy: 300, side: 240 }];
-  const next = tapOptions({ x: 400, y: 520 }, 1000, marked);
-  const most = 220 * CROP_MARGIN;
-  check("a crop never reaches past halfway to its neighbour", next.every((b) => b.side <= most + 1e-9), true);
-  check("sizes capped to the same value are tried once", new Set(next.map((b) => b.side)).size, next.length);
+  // Beys in a case, 220 apart: the circle may not reach past halfway to the next one.
+  const next = tapBox({ x: 400, y: 520 }, 1000, [{ cx: 400, cy: 300, side: 300 }]);
+  check("a circle never reaches past halfway to its neighbour", Math.round(next.side), Math.round(220 * CROP_MARGIN));
 }
 
 check("reading order: rows, then left to right",

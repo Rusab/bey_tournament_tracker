@@ -44,27 +44,23 @@ export const isSure = (matches) => !!(matches && matches[0] && matches[0].simila
 
 /*
  * The blader marks each bey: a tap on its middle, or a drag from its middle
- * to its edge. A drag gives the size; for a tap, a few sizes are tried and
- * the model's best match decides.
+ * to its edge. A drag gives the size; a tap takes the size of the beys
+ * already marked. Either way the model runs once per bey.
  */
 
+/** Of the photo's shorter side, how big the first tapped bey is taken to be. */
+export const FIRST_TAP = 0.3;
+
 /**
- * The crops to try for a tapped bey at point {x, y}: around the size of the
- * beys already marked, or else a spread of likely sizes. Never so big that
- * it reaches past halfway to another bey (beys do not overlap).
+ * The circle for a tapped bey at point {x, y}: the size of the beys already
+ * marked, or FIRST_TAP of the photo. Never so big that it reaches past
+ * halfway to another bey (beys do not overlap).
  */
-export function tapOptions(point, minDim, others = []) {
+export function tapBox(point, minDim, others = []) {
   const near = Math.min(Infinity, ...others.map((o) => Math.hypot(o.cx - point.x, o.cy - point.y)));
-  const most = near * CROP_MARGIN;
   const sides = others.map((o) => o.side).sort((a, b) => a - b);
-  const base = sides.length ? sides[Math.floor(sides.length / 2)] : 0;
-  const steps = base ? [0.8, 1, 1.25].map((k) => base * k) : [0.18, 0.24, 0.32, 0.42, 0.55].map((k) => k * minDim);
-  const out = [];
-  for (const want of steps) {
-    const side = Math.min(want, most);
-    if (!out.length || side > out[out.length - 1].side * 1.08) out.push({ cx: point.x, cy: point.y, side });
-  }
-  return out;
+  const want = sides.length ? sides[Math.floor(sides.length / 2)] : FIRST_TAP * minDim * CROP_MARGIN;
+  return { cx: point.x, cy: point.y, side: Math.min(want, near * CROP_MARGIN) };
 }
 
 /** Top row first, left to right; a bey counts as a new row below half a bey's height. */
@@ -156,6 +152,9 @@ export function loadDetector(onProgress) {
       tf.env.allowLocalModels = true;
       tf.env.localModelPath = "/models/";
       tf.env.backends.onnx.wasm.wasmPaths = "/ort/";
+      // The model runs in a background worker, so the page never freezes
+      // while it works.
+      tf.env.backends.onnx.wasm.proxy = true;
       const model = await tf.AutoModel.from_pretrained(MODEL_ID, {
         dtype: "q8", device: "wasm",
         progress_callback: (p) => {
@@ -172,8 +171,19 @@ export function loadDetector(onProgress) {
 
 const MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225];
 
-/** 768 numbers per square canvas (DETECT_SIZE across), each list of length 1. */
-export async function embed(canvases) {
+let queue = Promise.resolve();
+
+/**
+ * 768 numbers per square canvas (DETECT_SIZE across), each list of length
+ * 1. Calls wait their turn: the model does one thing at a time.
+ */
+export function embed(canvases) {
+  const run = queue.then(() => embedNow(canvases));
+  queue = run.catch(() => {});
+  return run;
+}
+
+async function embedNow(canvases) {
   const { tf, model } = await loadDetector();
   const S = DETECT_SIZE, plane = S * S;
   const out = [];

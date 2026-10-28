@@ -33,7 +33,7 @@ import {
 import { seriesRanking } from "./series.js";
 import {
   DETECT_KINDS, DETECT_MODEL, isSure, STAGINGS, loadDetector, loadPhoto, readingOrder,
-  cropBox, embed, vectorText, stagedPicture, tapOptions, CROP_MARGIN,
+  cropBox, embed, vectorText, stagedPicture, tapBox, CROP_MARGIN,
 } from "./detect.js";
 import { renderRankingImage } from "./rankingImage.js";
 
@@ -4629,20 +4629,14 @@ function DeckScanner({ size, userId, onUse, onClose }) {
     }
   };
 
-  // One bey: each crop size given is tried, and the one the model matches
-  // best is kept.
-  const look = async (options) => {
-    const crops = options.map((b) => cropBox(photo, b));
-    const vecs = await embed(crops);
-    const found = await Promise.all(vecs.map((v) => matchParts(vectorText(v), DETECT_MODEL, 3)));
-    if (found.some((m) => m === null)) throw new Error("setup");
-    if (found.some((m) => m.length === 0)) throw new Error("no-refs");
-    let best = 0;
-    found.forEach((m, i) => { if (m[0].similarity > found[best][0].similarity) best = i; });
-    return {
-      box: options[best], vec: vecs[best], crop: crops[best].toDataURL("image/jpeg", 0.8),
-      matches: found[best], pick: isSure(found[best]) ? found[best][0] : null,
-    };
+  // One bey: one crop, one run of the model, one match.
+  const look = async (box) => {
+    const crop = cropBox(photo, box);
+    const [vec] = await embed([crop]);
+    const matches = await matchParts(vectorText(vec), DETECT_MODEL, 3);
+    if (matches === null) throw new Error("setup");
+    if (!matches.length) throw new Error("no-refs");
+    return { box, vec, crop: crop.toDataURL("image/jpeg", 0.8), matches, pick: isSure(matches) ? matches[0] : null };
   };
   const ordered = (list) => readingOrder(list.map((b) => ({ ...b.box, bey: b }))).map((x) => x.bey);
 
@@ -4671,11 +4665,11 @@ function DeckScanner({ size, userId, onUse, onClose }) {
     const minDim = Math.min(photo.width, photo.height);
     const others = beys.filter((b) => b.key !== d.replaces).map((b) => b.box);
     const tapped = d.side < minDim * 0.06;
-    const options = tapped ? tapOptions({ x: d.cx, y: d.cy }, minDim, others) : [{ cx: d.cx, cy: d.cy, side: d.side }];
+    const box = tapped ? tapBox({ x: d.cx, y: d.cy }, minDim, others) : { cx: d.cx, cy: d.cy, side: d.side };
     const key = Math.random().toString(36).slice(2);
-    setPending((list) => [...list, { key, box: options[Math.floor(options.length / 2)] }]);
+    setPending((list) => [...list, { key, box }]);
     try {
-      const b = await look(options);
+      const b = await look(box);
       setBeys((list) => ordered([...list.filter((x) => x.key !== d.replaces), { ...b, key }]));
     } catch (er) { setErr(explain(er)); }
     setPending((list) => list.filter((x) => x.key !== key));
@@ -4730,7 +4724,8 @@ function DeckScanner({ size, userId, onUse, onClose }) {
       {stage === "review" && photo && (
         <>
           <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 10, maxWidth: "60ch" }}>
-            Tap the middle of each bey, or drag from its middle to its edge. Tap a bey again to redo its circle.
+            Tap the middle of each bey, or drag from its middle to its edge to size its circle. Tap or drag on
+            a bey again to redo it.
             Beys fill the deck top row first, left to right.
           </div>
           {/* Sized to the photo, and no taller than half the screen, so the page still scrolls around it. */}
