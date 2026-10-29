@@ -1,6 +1,12 @@
 /**
- * Builds the shareable QR code for the tournament app.
- * Run with: node scripts/make-qr.mjs
+ * Builds a shareable QR code for your copy of the app, light and dark.
+ *
+ *   node scripts/make-qr.mjs https://your-site.workers.dev
+ *   node scripts/make-qr.mjs https://your-site.workers.dev path/to/logo.png
+ *
+ * The logo is optional: a file, or an image's web address. Writes
+ * qr-light and qr-dark (SVG and PNG) in the project folder; they are not
+ * committed. Check they scan with scripts/check-qr.mjs.
  *
  * Error correction is level H (30% recoverable), which is what lets a logo sit
  * in the middle: the cleared area is only ~7% of the modules, well inside what
@@ -8,14 +14,17 @@
  */
 import QRCode from "qrcode";
 import sharp from "sharp";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const URL_TO_ENCODE = "https://bey-tournament-tracker.rusabsarmun.workers.dev";
-const LOGO_URL = "https://hbjflghggvdbjswbghww.supabase.co/storage/v1/object/public/tournament-bg/logo-1788301978009-x2zg94j.webp";
+const [URL_TO_ENCODE, LOGO_SOURCE] = process.argv.slice(2);
+if (!URL_TO_ENCODE) {
+  console.error("usage: node scripts/make-qr.mjs <your-site-address> [logo file or address]");
+  process.exit(2);
+}
 
 const QUIET = 4;          // modules of margin — below 4 and scanners struggle
 const LOGO_SPAN = 0.26;   // logo width as a fraction of the code
@@ -38,14 +47,19 @@ const THEMES = {
 };
 
 /**
- * The logo is stored as WebP, which SVG rasterisers handle inconsistently, so
- * it is converted to PNG before being embedded.
+ * The logo may be WebP, which SVG rasterisers handle inconsistently, so it is
+ * converted to PNG before being embedded.
  */
-async function fetchLogo() {
-  const res = await fetch(LOGO_URL);
-  if (!res.ok) throw new Error(`logo fetch failed: ${res.status}`);
-  const webp = Buffer.from(await res.arrayBuffer());
-  const png = await sharp(webp).resize(512, 512, { fit: "inside" }).png().toBuffer();
+async function fetchLogo(source) {
+  let raw;
+  if (/^https?:\/\//.test(source)) {
+    const res = await fetch(source);
+    if (!res.ok) throw new Error(`logo fetch failed: ${res.status}`);
+    raw = Buffer.from(await res.arrayBuffer());
+  } else {
+    raw = readFileSync(source);
+  }
+  const png = await sharp(raw).resize(512, 512, { fit: "inside" }).png().toBuffer();
   return { dataUri: `data:image/png;base64,${png.toString("base64")}`, bytes: png.length };
 }
 
@@ -65,7 +79,7 @@ function buildSVG(qr, logoUri, theme) {
   const span = Math.round(n * LOGO_SPAN);
   const from = Math.floor((n - span) / 2);
   const to = from + span;
-  const inLogo = (x, y) => x >= from - 1 && x < to + 1 && y >= from - 1 && y < to + 1;
+  const inLogo = (x, y) => !!logoUri && x >= from - 1 && x < to + 1 && y >= from - 1 && y < to + 1;
 
   const parts = [];
   for (let y = 0; y < n; y++) {
@@ -99,23 +113,23 @@ function buildSVG(qr, logoUri, theme) {
 ${parts.join("\n")}
 ${eye(0, 0)}${eye(n - 7, 0)}${eye(0, n - 7)}
   </g>
-  <rect x="${logoAt}" y="${logoAt}" width="${logoBox}" height="${logoBox}" rx="1.6" fill="${t.plate}" stroke="${t.plateEdge}" stroke-width=".12"/>
+${logoUri ? `  <rect x="${logoAt}" y="${logoAt}" width="${logoBox}" height="${logoBox}" rx="1.6" fill="${t.plate}" stroke="${t.plateEdge}" stroke-width=".12"/>
   <image href="${logoUri}" x="${logoAt}" y="${logoAt}" width="${logoBox}" height="${logoBox}"
-         preserveAspectRatio="xMidYMid meet" clip-path="url(#logoClip)"/>
+         preserveAspectRatio="xMidYMid meet" clip-path="url(#logoClip)"/>` : ""}
 </svg>`;
 }
 
-const logo = await fetchLogo();
+const logo = LOGO_SOURCE ? await fetchLogo(LOGO_SOURCE) : null;
 const qr = QRCode.create(URL_TO_ENCODE, { errorCorrectionLevel: "H" });
 
 console.log(`url        ${URL_TO_ENCODE}`);
 console.log(`version    ${qr.version} (${qr.modules.size}x${qr.modules.size} modules)`);
-console.log(`logo       ${(logo.bytes / 1024).toFixed(1)}KB embedded`);
+console.log(logo ? `logo       ${(logo.bytes / 1024).toFixed(1)}KB embedded` : "logo       none");
 
 const PNG_PX = 1400; // plenty for print at poster size
 
 for (const theme of Object.keys(THEMES)) {
-  const svg = buildSVG(qr, logo.dataUri, theme);
+  const svg = buildSVG(qr, logo && logo.dataUri, theme);
   writeFileSync(join(ROOT, `qr-${theme}.svg`), svg);
   await sharp(Buffer.from(svg), { density: 300 })
     .resize(PNG_PX, PNG_PX)

@@ -1,6 +1,8 @@
 /**
  * Proves the generated codes still scan with a logo sitting over the middle.
- * Run with: node scripts/check-qr.mjs
+ * Run with the same address the codes were made for:
+ *
+ *   node scripts/check-qr.mjs https://your-site.workers.dev
  *
  * Each code is decoded at several pixel sizes, which stands in for how small it
  * can be printed, or how far away a phone can be, before it stops reading.
@@ -11,7 +13,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED = "https://bey-tournament-tracker.rusabsarmun.workers.dev";
+const EXPECTED = process.argv[2];
+if (!EXPECTED) {
+  console.error("usage: node scripts/check-qr.mjs <the address the codes were made for>");
+  process.exit(2);
+}
 const SIZES = [1400, 800, 500, 300, 200, 140, 100];
 
 async function decodeAt(file, px) {

@@ -8,3 +8,7 @@ part-images/
 
 # Copied from node_modules by vite.config.js
 public/ort/
+
+# Event QR codes: made per copy with scripts/make-qr.mjs, never committed
+qr-*.png
+qr-*.svg

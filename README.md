@@ -226,9 +226,14 @@ From now on, every push to your main branch rebuilds and redeploys the site on i
 **Your own domain (optional):** in Cloudflare, open the worker → **Settings → Domains &
 Routes → Add**. Then add that address to Supabase's Redirect URLs too.
 
-**QR code for events (optional):** put your address in `URL_TO_ENCODE` at the top of
-`scripts/make-qr.mjs` and run `node scripts/make-qr.mjs`. It writes `qr-dark.png` and
-`qr-light.png` for posters and screens.
+**QR code for events (optional):** run
+
+```bash
+node scripts/make-qr.mjs https://my-community-bx.your-name.workers.dev path/to/your-logo.png
+```
+
+The logo is optional. It writes `qr-light` and `qr-dark` (PNG and SVG) for posters and
+screens. `node scripts/check-qr.mjs <same address>` then checks they scan at every size.
 
 ---
 
