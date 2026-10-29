@@ -21,7 +21,7 @@ select
 from tournaments t
 cross join profiles p
 where t.id = 'current'
-  and p.email = 'rusabcolabpro@gmail.com'   -- <- the owner
+  and p.email = 'your-email@example.com'   -- <- the owner
   -- Safe to re-run: a second copy is not made.
   and not exists (
     select 1 from events e where e.owner_id = p.id and e.data = t.data

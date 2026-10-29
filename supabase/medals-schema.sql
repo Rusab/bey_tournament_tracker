@@ -75,11 +75,12 @@ grant delete on medals to authenticated;
 
 -- --------------------------------------------------- the one account
 --
--- Change the address if medal access should belong to a different
--- account. To give it to someone else later, run the same statement with
--- their address; to take it away, set it to false.
-
-update profiles set can_award_medals = true where email = 'rusabcolabpro@gmail.com';
+-- Medal access is given to an account by make-admin.sql, once that
+-- account has signed up. To give it to someone else later, run:
+--
+--   update profiles set can_award_medals = true where email = 'their@email.com';
+--
+-- and set it to false to take it away.
 
 -- Who holds it now. Should be exactly one row.
 select email, can_award_medals from profiles where can_award_medals;

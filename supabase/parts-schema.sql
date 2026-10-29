@@ -307,10 +307,12 @@ on conflict (kind, lower(name)) do nothing;
 
 -- --------------------------------------------------- the one account
 --
--- Change the address if parts access should belong to a different
--- account; to take it away, set it to false.
-
-update profiles set can_manage_parts = true where email = 'rusabcolabpro@gmail.com';
+-- Parts access is given to an account by make-admin.sql, once that
+-- account has signed up. To give it to someone else later, run:
+--
+--   update profiles set can_manage_parts = true where email = 'their@email.com';
+--
+-- and set it to false to take it away.
 
 -- What it made:
 select (select count(*) from parts) as parts,
