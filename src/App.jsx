@@ -6056,8 +6056,6 @@ const CUTOUT_KEY = "bx:cutout";
  * part pictures come from the tournament. Each blader keeps their own photo
  * and its framing while the others are made.
  */
-const POSTER_KIND = { knockout: "Groups & knockout", league: "League", tag: "Tag team" };
-
 function PodiumPosterSheet({ t, onClose }) {
   const holders = useMemo(() => podiumHolders(t), [t]);
   // The tournament's own logo; without one, the app's wordmark.
@@ -6096,7 +6094,7 @@ function PodiumPosterSheet({ t, onClose }) {
         name,
         members: holder.player.members && holder.player.members.length ? holder.player.members.join(" & ") : null,
         tournament: t.name,
-        kind: POSTER_KIND[t.format] || "Tournament",
+        kind: "Tournament",
         combos: posterCombos(holder.player.deck),
         logoUrl,
         site: "BX Tournaments",
