@@ -5284,7 +5284,7 @@ function FinalStandingsSheet({ t, withDecks, posters, onClose, update }) {
               note: kings && kings.length
                 ? `${kings.length > 1 ? "Swiss Kings" : "Swiss King"}: ${kings.map((k) => k.name).join(", ")}`
                 : null,
-              site: "BX Tournaments",
+              site: location.host,
             }} />
         )}
         {saved && update && (
@@ -6637,7 +6637,7 @@ function SeriesSheet({ seriesId, meId, onClose }) {
                     cells: [r.total, r.tournaments, r.wins, Number.isFinite(r.best) ? ordinal(r.best) : "—"],
                   })),
                   note: null,
-                  site: "BX Tournaments",
+                  site: location.host,
                 }} />
             );
           })()}
