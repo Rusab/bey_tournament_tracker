@@ -39,6 +39,9 @@ import {
   cropBox, embed, vectorText, stagedPicture, tapBox, CROP_MARGIN,
 } from "./detect.js";
 import { renderRankingImage } from "./rankingImage.js";
+import { renderPodiumPoster, TEMPLATES, PLACE_STYLE } from "./podiumPoster.js";
+import { cutOut } from "./cutout.js";
+import { brandLogoUrl } from "./brandLogo.js";
 
 /* ================================================================== */
 /*  Domain                                                             */
@@ -1604,7 +1607,7 @@ function scoredCount(t) {
  *                 actually permitted; this only decides what is shown.
  * @param onExit   back to the list, when there is a list to go back to
  */
-function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
+function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete, posterAccess = false }) {
   const [t, setT] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState(initialTab);
@@ -2033,7 +2036,7 @@ function Board({ eventId, canEdit, isOwner, onExit, onReferees, onDelete }) {
           onReset={() => { setShowSetup(false); if (onDelete) onDelete(); }} />
       )}
       {showFinal && isAdmin && (
-        <FinalStandingsSheet t={t} update={update} onClose={() => setShowFinal(false)} />
+        <FinalStandingsSheet t={t} withDecks={tv} posters={posterAccess} update={update} onClose={() => setShowFinal(false)} />
       )}
       {blocked && (
         <ResultsInTheWay t={t} nameOf={nameOf} block={blocked} isOwner={isOwner}
@@ -5069,7 +5072,10 @@ const rankingMoved = (saved, fresh) =>
   JSON.stringify(saved.map((r) => [r.id, r.rank, r.total]))
   !== JSON.stringify(fresh.map((r) => [r.id, r.rank, r.total]));
 
-function FinalStandingsSheet({ t, onClose, update }) {
+function FinalStandingsSheet({ t, withDecks, posters, onClose, update }) {
+  const [postering, setPostering] = useState(false);
+  // The podium is the tournament's own, not this ranking; its decks come merged in.
+  const holders = useMemo(() => podiumHolders(withDecks || t), [withDecks, t]);
   const [cfg, setCfg] = useState(loadScoring);
   const [ask, setAsk] = useState(null);   // "confirm" | "unlock"
   const [imaging, setImaging] = useState(false);
@@ -5247,6 +5253,16 @@ function FinalStandingsSheet({ t, onClose, update }) {
           style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5, marginTop: 10 }}>
           <ImageIcon size={17} />Ranking image for social media
         </Btn>
+        {/* Only for the medal manager, for now. */}
+        {posters && (
+          <Btn disabled={!holders.length} onClick={() => setPostering(true)}
+            style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15.5, marginTop: 10 }}>
+            <Trophy size={17} />{holders.length ? "Podium posters" : "Podium posters, once the podium is decided"}
+          </Btn>
+        )}
+        {posters && postering && (
+          <PodiumPosterSheet t={withDecks || t} onClose={() => setPostering(false)} />
+        )}
         {imaging && (
           <RankingImageSheet fileName={`${slug(t.name)}-ranking.png`} onClose={() => setImaging(false)}
             spec={{
@@ -5994,6 +6010,253 @@ function RankingImageSheet({ spec, fileName, onClose }) {
           </div>
           <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>
             On a phone you can also press and hold the image to save it to your photos.
+          </div>
+        </>
+      )}
+    </SheetFrame>,
+    document.body,
+  );
+}
+
+/* ---- podium posters ---------------------------------------------- */
+
+/**
+ * Who a tournament's podium posters are for: its own podium, from
+ * podiumPlaces, and the Swiss King of a finished group stage. Not the
+ * points ranking: these are the places the tournament itself decided.
+ */
+function podiumHolders(t) {
+  const PLACE_KEY = { 1: "champion", 2: "runnerUp", 3: "third" };
+  const byId = Object.fromEntries(t.players.map((p) => [p.id, p]));
+  const out = Object.entries(podiumPlaces(t))
+    .sort((a, b) => a[1] - b[1])
+    .map(([id, n]) => ({ id, place: PLACE_KEY[n] }));
+  const groups = t.groupMatches || [];
+  if (!isLeague(t) && groups.length && groups.every((m) => m.done)) {
+    swissKings(t).forEach((k) => out.push({ id: k.id, place: "swiss" }));
+  }
+  return out.filter((h) => byId[h.id]).map((h) => ({ ...h, key: `${h.place}:${h.id}`, player: byId[h.id] }));
+}
+
+/** A deck as a poster draws it: each combo's full name and its parts' pictures. */
+const posterCombos = (deck) => (deck || []).map((c) => {
+  const type = COMBO_TYPES[c.type] ? c.type : "bx";
+  const slots = COMBO_TYPES[type].slots.filter((s) => c[s]);
+  return {
+    name: slots.map((s) => c[s]).join(" "),
+    parts: slots.map((s) => ({ name: c[s], url: partImageUrl(partPicture(s, c[s])) })),
+  };
+});
+
+const CUTOUT_KEY = "bx:cutout";
+
+/**
+ * A poster for each blader on the podium, in three templates. The organiser
+ * adds the photo, which stays in this browser; the place, the deck and its
+ * part pictures come from the tournament. Each blader keeps their own photo
+ * and its framing while the others are made.
+ */
+const POSTER_KIND = { knockout: "Groups & knockout", league: "League", tag: "Tag team" };
+
+function PodiumPosterSheet({ t, onClose }) {
+  const holders = useMemo(() => podiumHolders(t), [t]);
+  // The tournament's own logo; without one, the app's wordmark.
+  const [brand, setBrand] = useState(null);
+  useEffect(() => { if (!t.logoUrl) brandLogoUrl().then(setBrand); }, [t.logoUrl]);
+  const logoUrl = t.logoUrl || brand;
+  const [who, setWho] = useState(holders.length ? holders[0].key : null);
+  const [template, setTemplate] = useState("classic");
+  const [photos, setPhotos] = useState({});        // holder key -> { img, cut, zoom, x, y }
+  // Background removal: off until ticked, and remembered on this device.
+  const [autoCut, setAutoCutState] = useState(() => { try { return localStorage.getItem(CUTOUT_KEY) === "1"; } catch (e) { return false; } });
+  const setAutoCut = (on) => {
+    setAutoCutState(on);
+    try { localStorage.setItem(CUTOUT_KEY, on ? "1" : "0"); } catch (e) { /* private mode */ }
+  };
+  const [cutting, setCutting] = useState(null);   // { key, stage: "download" | "work", progress }
+  const [poster, setPoster] = useState(null);      // { blob, url }
+  const shown = useRef(null);                      // the preview address, freed when replaced or closed
+  const [err, setErr] = useState(null);
+  const fileRef = useRef(null);
+
+  const holder = holders.find((h) => h.key === who) || null;
+  const photo = holder ? photos[holder.key] || null : null;
+  // The cut-out when there is one and it is wanted, the photo as it came otherwise.
+  const drawn = photo ? { ...photo, img: autoCut && photo.cut ? photo.cut : photo.img } : null;
+  const name = holder ? holder.player.name : "";
+  const fileName = holder ? `${slug(t.name)}-${slug(PLACE_STYLE[holder.place].label)}-${slug(name)}.png` : "poster.png";
+
+  // Redrawn whenever anything on it changes; a slider drag settles before drawing.
+  useEffect(() => {
+    if (!holder || !logoUrl) return undefined;
+    let gone = false;
+    const timer = setTimeout(() => {
+      renderPodiumPoster({
+        place: holder.place,
+        name,
+        members: holder.player.members && holder.player.members.length ? holder.player.members.join(" & ") : null,
+        tournament: t.name,
+        kind: POSTER_KIND[t.format] || "Tournament",
+        combos: posterCombos(holder.player.deck),
+        logoUrl,
+        site: location.host,
+      }, template, drawn).then((blob) => {
+        if (gone) return;
+        setErr(null);
+        if (shown.current) URL.revokeObjectURL(shown.current);
+        shown.current = URL.createObjectURL(blob);
+        setPoster({ blob, url: shown.current });
+      }).catch((e) => { if (!gone) setErr(e.message || "The poster could not be made."); });
+    }, 120);
+    return () => { gone = true; clearTimeout(timer); };
+  }, [holder && holder.key, template, photo, autoCut, logoUrl]);
+
+  // With the box ticked, each photo has its background removed once; the
+  // first time also downloads the model, with its progress shown.
+  useEffect(() => {
+    if (!autoCut || !holder || !photo || photo.cut || cutting) return;
+    const key = holder.key;
+    setCutting({ key, stage: "work", progress: null });
+    cutOut(photo.img, (p) => setCutting({ key, stage: p < 1 ? "download" : "work", progress: p }))
+      .then((cut) => setPhotos((all) => (all[key] ? { ...all, [key]: { ...all[key], cut } } : all)))
+      .catch((e) => {
+        setErr(`The background could not be removed on this device (${e.message || "it stopped"}). The photo is used as it is.`);
+        setAutoCut(false);
+      })
+      .finally(() => setCutting(null));
+  }, [autoCut, holder && holder.key, photo && photo.img, photo && photo.cut, cutting]);
+  useEffect(() => () => { if (shown.current) URL.revokeObjectURL(shown.current); }, []);
+
+  const pickPhoto = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f || !holder) return;
+    const img = new Image();
+    img.onload = () => setPhotos((p) => ({ ...p, [holder.key]: { img, zoom: 1, x: 0, y: 0 } }));
+    img.onerror = () => setErr("That photo could not be opened. Try a JPG or PNG.");
+    img.src = URL.createObjectURL(f);
+  };
+  const frame = (field, value) => setPhotos((p) => ({ ...p, [holder.key]: { ...p[holder.key], [field]: value } }));
+
+  const file = poster ? new File([poster.blob], fileName, { type: "image/png" }) : null;
+  const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
+  const share = async () => {
+    try { await navigator.share({ files: [file], title: `${name} · ${t.name}` }); }
+    catch (e) { if (e && e.name !== "AbortError") setErr("Sharing did not work here. Use Download instead."); }
+  };
+  const download = () => {
+    const a = document.createElement("a");
+    a.href = poster.url; a.download = fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  const slider = (label, field, min, max, step) => (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: C.muted }}>
+      <span style={{ width: 92, flexShrink: 0 }}>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={photo[field]}
+        onChange={(e) => frame(field, Number(e.target.value))} style={{ flex: 1, accentColor: C.magenta }} />
+    </label>
+  );
+
+  return createPortal(
+    <SheetFrame title="Podium posters" onClose={onClose}>
+      {!holders.length ? (
+        <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.55 }}>
+          The podium isn't decided yet. Posters can be made once the final is played
+          (or, in a league, every match).
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {holders.map((h) => {
+              const on = h.key === who, style = PLACE_STYLE[h.place];
+              return (
+                <button key={h.key} onClick={() => setWho(h.key)} className="bx-d" style={{
+                  padding: "7px 11px", borderRadius: 3, cursor: "pointer", fontSize: 14, fontWeight: 700,
+                  background: on ? `${style.color}1F` : C.base, color: on ? C.ink : C.muted,
+                  border: `1px solid ${on ? style.color : C.line}`, display: "flex", alignItems: "center", gap: 7,
+                }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: style.color }} />
+                  {style.label} · {h.player.name}
+                  {photos[h.key] && <Camera size={13} />}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <Segmented value={template} onChange={setTemplate} tone={C.magenta} options={TEMPLATES} />
+          </div>
+
+          <input ref={fileRef} type="file" accept="image/*" onChange={pickPhoto} style={{ display: "none" }} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: photo ? 10 : 14 }}>
+            <Btn tone={photo ? "default" : "primary"} onClick={() => fileRef.current && fileRef.current.click()}
+              style={{ flex: 1, justifyContent: "center", padding: 12 }}>
+              <Camera size={16} />{photo ? "Change photo" : `Add ${name}'s photo`}
+            </Btn>
+            {photo && (
+              <Btn tone="ghost" onClick={() => setPhotos((p) => { const n = { ...p }; delete n[holder.key]; return n; })}
+                style={{ padding: "12px 14px" }}>
+                <X size={16} />Remove
+              </Btn>
+            )}
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 14, cursor: "pointer", marginBottom: 4 }}>
+            <input type="checkbox" checked={autoCut} onChange={(e) => setAutoCut(e.target.checked)}
+              style={{ width: 17, height: 17, accentColor: C.magenta }} />
+            Remove the background automatically
+          </label>
+          <div style={{ color: C.muted, fontSize: 12.5, lineHeight: 1.45, margin: "0 0 12px 26px" }}>
+            Done on this device. The first time downloads a 12 MB tool; after that it is quick.
+          </div>
+          {cutting && holder && cutting.key === holder.key && (
+            <div style={{ ...card, marginBottom: 12 }}>
+              <div style={{ fontSize: 13.5, marginBottom: 8 }}>
+                {cutting.stage === "download"
+                  ? `Downloading the background remover… ${Math.round((cutting.progress || 0) * 100)}%`
+                  : "Removing the background…"}
+              </div>
+              <div style={{ height: 6, background: C.base, borderRadius: 3, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", background: C.magenta, transition: "width .2s",
+                  width: cutting.stage === "download" ? `${Math.round((cutting.progress || 0) * 100)}%` : "100%",
+                  opacity: cutting.stage === "download" ? 1 : 0.5,
+                }} />
+              </div>
+            </div>
+          )}
+          {photo && (
+            <div style={{ ...card, display: "grid", gap: 8, marginBottom: 14 }}>
+              {slider("Size", "zoom", 0.5, 2, 0.02)}
+              {slider("Left / right", "x", -0.5, 0.5, 0.01)}
+              {slider("Up / down", "y", -0.5, 0.5, 0.01)}
+            </div>
+          )}
+
+          {err && <div style={{ color: C.magenta, fontSize: 13.5, marginBottom: 12 }}>{err}</div>}
+          {poster ? (
+            <img src={poster.url} alt={`${name}'s poster`} style={{
+              width: "100%", display: "block", borderRadius: 4, border: `1px solid ${C.line}`, marginBottom: 14,
+            }} />
+          ) : !err && <div style={{ color: C.muted, fontSize: 14, marginBottom: 14 }}>Drawing the poster…</div>}
+
+          {poster && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {canShare && (
+                <Btn tone="primary" onClick={share} style={{ flex: 1, justifyContent: "center", padding: 13 }}>
+                  <Send size={16} />Share
+                </Btn>
+              )}
+              <Btn tone={canShare ? "default" : "primary"} onClick={download}
+                style={{ flex: 1, justifyContent: "center", padding: 13 }}>
+                <Download size={16} />Download PNG
+              </Btn>
+            </div>
+          )}
+          <div style={{ color: C.muted, fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>
+            A photo with its background removed looks best; any other photo fades into
+            the black at its edges. Photos stay on this device. The deck shown is the one
+            entered for this tournament.
           </div>
         </>
       )}
@@ -8641,27 +8904,12 @@ function PartEditor({ part, onClose, onSaved }) {
 /* ---- meta ---- */
 
 /**
- * One tournament's entries for the meta table: each player with a deck, the
- * podium place they finished in (once it is decided), whether they made the
- * knockout, and their match wins and losses across the whole tournament.
- *
- * The podium: with a knockout, the final's winner and loser, and the
- * third-place match's winner - or, with no third-place match, both beaten
- * semi-finalists. Without a knockout, the top three of the table once every
- * match is played.
+ * A tournament's own podium, { playerId: 1 | 2 | 3 }, once it is decided:
+ * with a knockout, the final's winner and loser, and the third-place match's
+ * winner - or, with no third-place match, both beaten semi-finalists.
+ * Without a knockout, the top three of the table once every match is played.
  */
-function metaEntries(t, decks, eventId) {
-  if (!t || !Array.isArray(t.players)) return [];
-  const rec = {};
-  const tally = (id) => (rec[id] = rec[id] || { wins: 0, losses: 0 });
-  allMatchesOf(t).forEach((m) => {
-    if (!m.done || !m.p1 || !m.p2) return;
-    const w = winnerOf(m);
-    if (!w) return;
-    tally(w).wins++;
-    tally(w === m.p1 ? m.p2 : m.p1).losses++;
-  });
-
+function podiumPlaces(t) {
   const place = {};
   const loserOf = (m) => { const w = winnerOf(m); return w && m.p1 && m.p2 ? (w === m.p1 ? m.p2 : m.p1) : null; };
   if (t.bracket && t.bracket.rounds && t.bracket.rounds.length) {
@@ -8685,6 +8933,28 @@ function metaEntries(t, decks, eventId) {
       isLeague(t) ? t.leaguePoints : null, t.tieBreaks);
     rows.slice(0, 3).forEach((r, i) => { if (r.played) place[r.id] = i + 1; });
   }
+  return place;
+}
+
+/**
+ * One tournament's entries for the meta table: each player with a deck, the
+ * podium place they finished in (once it is decided), whether they made the
+ * knockout, and their match wins and losses across the whole tournament.
+ * The podium is the tournament's own, from podiumPlaces.
+ */
+function metaEntries(t, decks, eventId) {
+  if (!t || !Array.isArray(t.players)) return [];
+  const rec = {};
+  const tally = (id) => (rec[id] = rec[id] || { wins: 0, losses: 0 });
+  allMatchesOf(t).forEach((m) => {
+    if (!m.done || !m.p1 || !m.p2) return;
+    const w = winnerOf(m);
+    if (!w) return;
+    tally(w).wins++;
+    tally(w === m.p1 ? m.p2 : m.p1).losses++;
+  });
+
+  const place = podiumPlaces(t);
 
   const cut = new Set();
   if (t.bracket && t.bracket.rounds && t.bracket.rounds[0]) {
@@ -9463,6 +9733,7 @@ export default function App() {
           eventId={openId}
           canEdit={!!open}
           isOwner={open ? open.role === "owner" : false}
+          posterAccess={awarder}
           onExit={backToList}
           onReferees={open && open.role === "owner" ? () => setSheet("referees") : null}
           onDelete={async () => {

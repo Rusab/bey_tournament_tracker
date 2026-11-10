@@ -337,6 +337,12 @@ node scripts/check-sql.mjs supabase/some-file.sql   # parse a SQL file before ru
 - **The deck model** (`public/models/dinov2-small`, 24 MB) ships with the site. The ONNX
   runtime files are copied into `public/ort/` from `node_modules` at build time, so the
   scanner needs nothing from any other site.
+- **Podium posters** (`src/podiumPoster.js`) are drawn on a canvas at 1080×1350, in three
+  templates, with the tournament's uploaded logo (or the app's wordmark, from
+  `src/brandLogo.js`). The optional background remover (`src/cutout.js`) is MODNet
+  (Apache-2.0), in `public/models/modnet` as its 12 MB half-precision file. It downloads
+  only when ticked, and runs in the browser. Posters are open to the medal manager only,
+  for now.
 - Design notes for larger features are in `docs/`.
 
 ---
